@@ -7,13 +7,12 @@ app = Flask(__name__)
 # Получаем переменные среды
 api_key = os.getenv("BYBIT_API_KEY")
 api_secret = os.getenv("BYBIT_API_SECRET")
-symbol = os.getenv("SYMBOL", "BTCUSDT")
 
 # Подключаемся к Bybit через pybit Unified HTTP API
 session = HTTP(api_key=api_key, api_secret=api_secret)
 
 def get_balance(asset="USDT"):
-    balance_data = session.get_wallet_balance(accountType="UNIFIED")  # UNIFIED для USDT фьючерсов
+    balance_data = session.get_wallet_balance(accountType="UNIFIED")
     usdt_data = balance_data.get("result", {}).get("list", [])[0]
     coin_balances = usdt_data.get("coin", [])
     for coin in coin_balances:
@@ -21,7 +20,7 @@ def get_balance(asset="USDT"):
             return float(coin.get("availableToTrade", 0))
     return 0.0
 
-def get_price():
+def get_price(symbol):
     ticker = session.get_ticker(category="linear", symbol=symbol)
     return float(ticker["result"]["list"][0]["lastPrice"])
 
@@ -29,11 +28,12 @@ def get_price():
 def webhook():
     data = request.get_json()
     action = data.get("action", "").upper()
+    symbol = data.get("symbol", "BTCUSDT")  # <-- символ из webhook
 
     try:
         balance = get_balance("USDT")
-        price = get_price()
-        qty = round(balance / price, 3)  # округляем до 0.001 BTC
+        price = get_price(symbol)
+        qty = round(balance / price, 3)
 
         if action == "LONG":
             order = session.place_order(
@@ -44,7 +44,7 @@ def webhook():
                 qty=qty,
                 time_in_force="GoodTillCancel"
             )
-            return jsonify({"status": "long_order_sent", "qty": qty, "order": order})
+            return jsonify({"status": "long_order_sent", "symbol": symbol, "qty": qty, "order": order})
 
         elif action == "CLOSE":
             order = session.place_order(
@@ -55,7 +55,7 @@ def webhook():
                 qty=qty,
                 time_in_force="GoodTillCancel"
             )
-            return jsonify({"status": "close_order_sent", "qty": qty, "order": order})
+            return jsonify({"status": "close_order_sent", "symbol": symbol, "qty": qty, "order": order})
 
         return jsonify({"error": "invalid action"}), 400
 
