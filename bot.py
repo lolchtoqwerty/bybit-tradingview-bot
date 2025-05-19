@@ -5,14 +5,14 @@ import hashlib
 from flask import Flask, request, jsonify
 import requests
 
-# Load configuration from environment
+# Load config from environment
 API_KEY    = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 BASE_URL   = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Helper: send notification to Telegram (optional)
+# Telegram helper
 def send_telegram(message: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -22,56 +22,63 @@ def send_telegram(message: str):
         except Exception as e:
             print(f"Telegram error: {e}")
 
-# Place a market order on Bybit Testnet
-def place_order(symbol: str, side: str, qty: float):
+# Sign parameters for Bybit
+def sign_params(params: dict) -> str:
+    sign_str = '&'.join(f"{k}={v}" for k,v in sorted(params.items()))
+    return hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+
+# Fetch wallet balance (USDT)
+def get_balance(currency="USDT"):
+    path   = "/v2/private/wallet/balance"
+    ts     = int(time.time() * 1000)
+    params = {"api_key": API_KEY, "timestamp": ts}
+    params["sign"] = sign_params(params)
+    r = requests.get(BASE_URL + path, params=params)
+    data = r.json().get("result", {})
+    return data.get(currency, {}).get("wallet_balance")
+
+# Place market order
+def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
     path   = "/v2/private/order/create"
     ts     = int(time.time() * 1000)
     params = {
         "api_key": API_KEY,
         "symbol": symbol,
-        "side": side.upper(),    # BUY or SELL
+        "side": side.upper(),
         "order_type": "Market",
         "qty": qty,
         "time_in_force": "GoodTillCancel",
-        "timestamp": ts
+        "timestamp": ts,
+        "reduce_only": str(reduce_only).lower()
     }
-    # Create signature
-    sorted_params = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
-    params['sign'] = hmac.new(
-        API_SECRET.encode(), sorted_params.encode(), hashlib.sha256
-    ).hexdigest()
+    params["sign"] = sign_params(params)
+    r = requests.post(BASE_URL + path, params=params, timeout=10)
+    res = r.json()
+    send_telegram(f"{side} {symbol} qty={qty} → {res}")
+    return res
 
-    url = BASE_URL + path
-    resp = requests.post(url, params=params, timeout=10)
-    result = resp.json()
-    send_telegram(f"Order {side}: {symbol} qty={qty} -> {result}")
-    return result
-
-# Flask app
-app = Flask(__name__)
+# Flask app\ napp = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True)
-    # Expected fields: symbol, side, leverage (optional), timeframe
     symbol = data.get('symbol')
     side   = data.get('side')
-    leverage = data.get('leverage', 1)
+    qty    = data.get('qty', 1)
 
-    # Determine quantity (fixed or based on leverage)
-    qty = data.get('qty', 1)
-    # Override qty logic as needed
-
-    # Execute order
-    if side in ('buy', 'sell'):
-        resp = place_order(symbol, 'Buy' if side=='buy' else 'Sell', qty)
-        return jsonify(resp)
-    elif side.startswith('exit'):
-        # For exits, just print/log
-        send_telegram(f"Exit signal: {data}")
-        return jsonify({"status": "exit", "data": data})
-    else:
-        return jsonify({"error": "unknown side"}), 400
+    if side == 'buy':
+        place_order(symbol, 'Buy', qty)
+    elif side == 'sell':
+        place_order(symbol, 'Sell', qty)
+    elif 'exit' in side:
+        # Exit position
+        if 'long' in side:
+            place_order(symbol, 'Sell', qty, reduce_only=True)
+        else:
+            place_order(symbol, 'Buy',  qty, reduce_only=True)
+        bal = get_balance(symbol)
+        send_telegram(f"Balance after exit: {bal} {symbol}")
+    return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
