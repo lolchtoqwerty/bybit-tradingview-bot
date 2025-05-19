@@ -57,7 +57,8 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
     send_telegram(f"{side} {symbol} qty={qty} → {res}")
     return res
 
-# Flask app\ napp = Flask(__name__)
+# Initialize Flask app
+app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -71,11 +72,10 @@ def webhook():
     elif side == 'sell':
         place_order(symbol, 'Sell', qty)
     elif 'exit' in side:
-        # Exit position
         if 'long' in side:
             place_order(symbol, 'Sell', qty, reduce_only=True)
         else:
-            place_order(symbol, 'Buy',  qty, reduce_only=True)
+            place_order(symbol, 'Buy', qty, reduce_only=True)
         bal = get_balance(symbol)
         send_telegram(f"Balance after exit: {bal} {symbol}")
     return jsonify({"status": "ok"})
