@@ -1,91 +1,77 @@
-
 import os
-import json
-import requests
+import time
+import hmac
+import hashlib
 from flask import Flask, request, jsonify
-from pybit.unified_trading import HTTP
+import requests
 
+# Load configuration from environment
+API_KEY    = os.getenv("BYBIT_API_KEY")
+API_SECRET = os.getenv("BYBIT_API_SECRET")
+BASE_URL   = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Helper: send notification to Telegram (optional)
+def send_telegram(message: str):
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        try:
+            requests.post(url, json=payload)
+        except Exception as e:
+            print(f"Telegram error: {e}")
+
+# Place a market order on Bybit Testnet
+def place_order(symbol: str, side: str, qty: float):
+    path   = "/v2/private/order/create"
+    ts     = int(time.time() * 1000)
+    params = {
+        "api_key": API_KEY,
+        "symbol": symbol,
+        "side": side.upper(),    # BUY or SELL
+        "order_type": "Market",
+        "qty": qty,
+        "time_in_force": "GoodTillCancel",
+        "timestamp": ts
+    }
+    # Create signature
+    sorted_params = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
+    params['sign'] = hmac.new(
+        API_SECRET.encode(), sorted_params.encode(), hashlib.sha256
+    ).hexdigest()
+
+    url = BASE_URL + path
+    resp = requests.post(url, params=params, timeout=10)
+    result = resp.json()
+    send_telegram(f"Order {side}: {symbol} qty={qty} -> {result}")
+    return result
+
+# Flask app
 app = Flask(__name__)
 
-api_key = os.getenv("BYBIT_API_KEY")
-api_secret = os.getenv("BYBIT_API_SECRET")
-telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
-telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-session = HTTP(api_key=api_key, api_secret=api_secret)
-
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-    payload = {"chat_id": telegram_chat_id, "text": message}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Telegram error: {e}")
-
-@app.route("/", methods=["POST"])
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.json
-    try:
-        symbol = data["symbol"]
-        tf = data["timeframe"]
-        side = data["side"]
-        leverage = int(data["leverage"])
+    data = request.get_json(force=True)
+    # Expected fields: symbol, side, leverage (optional), timeframe
+    symbol = data.get('symbol')
+    side   = data.get('side')
+    leverage = data.get('leverage', 1)
 
-        # Установка изолированной маржи и плеча
-        session.set_margin_mode(category="linear", symbol=symbol, tradeMode=1)
-        session.set_leverage(category="linear", symbol=symbol, buyLeverage=leverage, sellLeverage=leverage)
+    # Determine quantity (fixed or based on leverage)
+    qty = data.get('qty', 1)
+    # Override qty logic as needed
 
-        # Получение баланса
-        wallet = session.get_wallet_balance(accountType="UNIFIED")
-        available = float(wallet["result"]["list"][0]["coin"][0]["availableToTrade"])
-        usdt_amount = available * 0.20
+    # Execute order
+    if side in ('buy', 'sell'):
+        resp = place_order(symbol, 'Buy' if side=='buy' else 'Sell', qty)
+        return jsonify(resp)
+    elif side.startswith('exit'):
+        # For exits, just print/log
+        send_telegram(f"Exit signal: {data}")
+        return jsonify({"status": "exit", "data": data})
+    else:
+        return jsonify({"error": "unknown side"}), 400
 
-        # Получение текущей цены
-        ob = session.get_orderbook(symbol=symbol)
-        price = float(ob["result"]["b"][0][0])
-
-        # Расчет объема
-        qty = round(usdt_amount / price, 3)
-
-        if side in ["buy", "sell"]:
-            session.place_order(
-                category="linear",
-                symbol=symbol,
-                side="Buy" if side == "buy" else "Sell",
-                orderType="Market",
-                qty=qty,
-                timeInForce="GoodTillCancel"
-            )
-            send_telegram_message(f"✅ Открыт {'лонг' if side == 'buy' else 'шорт'} по {symbol} на {qty} (20% баланса)")
-        elif side == "exit long":
-            session.place_order(
-                category="linear",
-                symbol=symbol,
-                side="Sell",
-                orderType="Market",
-                qty=qty,
-                timeInForce="GoodTillCancel",
-                reduceOnly=True
-            )
-            send_telegram_message(f"🔻 Закрыт лонг по {symbol}")
-        elif side == "exit short":
-            session.place_order(
-                category="linear",
-                symbol=symbol,
-                side="Buy",
-                orderType="Market",
-                qty=qty,
-                timeInForce="GoodTillCancel",
-                reduceOnly=True
-            )
-            send_telegram_message(f"🔺 Закрыт шорт по {symbol}")
-        else:
-            return jsonify({"error": "Unknown signal"}), 400
-
-        return jsonify({"status": "order placed"}), 200
-    except Exception as e:
-        send_telegram_message(f"❌ Ошибка: {e}")
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
