@@ -27,15 +27,19 @@ def sign_params(params: dict) -> str:
     sign_str = '&'.join(f"{k}={v}" for k,v in sorted(params.items()))
     return hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
 
-# Fetch wallet balance (USDT)
+# Fetch wallet balance
 def get_balance(currency="USDT"):
     path   = "/v2/private/wallet/balance"
     ts     = int(time.time() * 1000)
     params = {"api_key": API_KEY, "timestamp": ts}
     params["sign"] = sign_params(params)
     r = requests.get(BASE_URL + path, params=params)
-    data = r.json().get("result", {})
-    return data.get(currency, {}).get("wallet_balance")
+    try:
+        data = r.json().get("result", {})
+        return data.get(currency, {}).get("wallet_balance")
+    except ValueError:
+        print("Balance fetch non-JSON:", r.status_code, r.text)
+        return None
 
 # Place market order
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
@@ -53,9 +57,12 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
         "reduce_only": str(reduce_only).lower()
     }
     params["sign"] = sign_params(params)
-    url = BASE_URL + path
-    resp = requests.post(url, params=params, timeout=10)
-    res = resp.json()
+    resp = requests.post(BASE_URL + path, params=params, timeout=10)
+    try:
+        res = resp.json()
+    except ValueError:
+        print("Order create non-JSON response:", resp.status_code, resp.text)
+        res = {"ret_code": -1, "ret_msg": resp.text}
     send_telegram(f"{side} {symbol} qty={qty} → {res}")
     return res
 
@@ -64,7 +71,6 @@ app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # Debug incoming webhook payload
     print("=== GOT WEBHOOK ===", request.data)
     try:
         data = request.get_json(force=True)
@@ -77,18 +83,17 @@ def webhook():
     side   = data.get('side')
     qty    = data.get('qty', 1)
 
-    # Execute based on side
     if side == 'buy':
         place_order(symbol, 'Buy', qty)
     elif side == 'sell':
         place_order(symbol, 'Sell', qty)
     elif side == 'exit long':
         place_order(symbol, 'Sell', qty, reduce_only=True)
-        bal = get_balance(symbol)
+        bal = get_balance()
         send_telegram(f"Balance after exit long: {bal} {symbol}")
     elif side == 'exit short':
         place_order(symbol, 'Buy', qty, reduce_only=True)
-        bal = get_balance(symbol)
+        bal = get_balance()
         send_telegram(f"Balance after exit short: {bal} {symbol}")
     else:
         print("Unknown side:", side)
