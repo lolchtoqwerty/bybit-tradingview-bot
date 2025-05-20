@@ -39,6 +39,7 @@ def get_balance(currency="USDT"):
 
 # Place market order
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
+    print("=== Place Order Called ===", symbol, side, qty, "reduce_only=", reduce_only)
     path   = "/v2/private/order/create"
     ts     = int(time.time() * 1000)
     params = {
@@ -52,8 +53,9 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
         "reduce_only": str(reduce_only).lower()
     }
     params["sign"] = sign_params(params)
-    r = requests.post(BASE_URL + path, params=params, timeout=10)
-    res = r.json()
+    url = BASE_URL + path
+    resp = requests.post(url, params=params, timeout=10)
+    res = resp.json()
     send_telegram(f"{side} {symbol} qty={qty} → {res}")
     return res
 
@@ -62,23 +64,38 @@ app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json(force=True)
+    # Debug incoming webhook payload
+    print("=== GOT WEBHOOK ===", request.data)
+    try:
+        data = request.get_json(force=True)
+        print("Parsed JSON:", data)
+    except Exception as e:
+        print("JSON parse error:", e)
+        return jsonify({"error": "invalid JSON"}), 400
+
     symbol = data.get('symbol')
     side   = data.get('side')
     qty    = data.get('qty', 1)
 
+    # Execute based on side
     if side == 'buy':
         place_order(symbol, 'Buy', qty)
     elif side == 'sell':
         place_order(symbol, 'Sell', qty)
-    elif 'exit' in side:
-        if 'long' in side:
-            place_order(symbol, 'Sell', qty, reduce_only=True)
-        else:
-            place_order(symbol, 'Buy', qty, reduce_only=True)
+    elif side == 'exit long':
+        place_order(symbol, 'Sell', qty, reduce_only=True)
         bal = get_balance(symbol)
-        send_telegram(f"Balance after exit: {bal} {symbol}")
+        send_telegram(f"Balance after exit long: {bal} {symbol}")
+    elif side == 'exit short':
+        place_order(symbol, 'Buy', qty, reduce_only=True)
+        bal = get_balance(symbol)
+        send_telegram(f"Balance after exit short: {bal} {symbol}")
+    else:
+        print("Unknown side:", side)
+        return jsonify({"error": "unknown side"}), 400
+
     return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
