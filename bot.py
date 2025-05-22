@@ -22,12 +22,12 @@ def send_telegram(message: str):
         except Exception as e:
             print(f"Telegram error: {e}")
 
-# Sign parameters for Bybit
+# Sign parameters for Bybit (HMAC SHA256)
 def sign_params(params: dict) -> str:
     sign_str = '&'.join(f"{k}={v}" for k,v in sorted(params.items()))
     return hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
 
-# Fetch wallet balance
+# Fetch wallet balance for USDT perpetual (linear)
 def get_balance(currency="USDT"):
     path   = "/v2/private/wallet/balance"
     ts     = int(time.time() * 1000)
@@ -41,22 +41,26 @@ def get_balance(currency="USDT"):
         print("Balance fetch non-JSON:", r.status_code, r.text)
         return None
 
-# Place market order
+# Place market order for USDT linear perpetual
+# Use unified linear endpoint instead of v2 inverse
+
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
     print("=== Place Order Called ===", symbol, side, qty, "reduce_only=", reduce_only)
-    path   = "/v2/private/order/create"
+    path   = "/private/linear/order/create"
     ts     = int(time.time() * 1000)
+    # all params must be included in signature
     params = {
         "api_key": API_KEY,
         "symbol": symbol,
         "side": side.upper(),
         "order_type": "Market",
         "qty": qty,
-        "time_in_force": "GoodTillCancel",
+        "time_in_force": "ImmediateOrCancel",
+        "reduce_only": str(reduce_only).lower(),
         "timestamp": ts,
-        "reduce_only": str(reduce_only).lower()
     }
     params["sign"] = sign_params(params)
+    # send as query parameters
     resp = requests.post(BASE_URL + path, params=params, timeout=10)
     try:
         res = resp.json()
