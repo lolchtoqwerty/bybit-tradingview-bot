@@ -69,7 +69,7 @@ def bybit_post(path: str, body: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
     req_path = path
-n    payload = json.dumps(body)
+    payload = json.dumps(body)
     signature = sign_v5(timestamp, recv_window, req_path, payload)
     headers = {
         "Content-Type": "application/json",
