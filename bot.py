@@ -1,3 +1,5 @@
+```python
+# File: bot.py
 import os
 import time
 from flask import Flask, request, jsonify
@@ -37,26 +39,43 @@ def get_balance(currency="USDT"):
         print(f"Balance fetch error: {e}")
         return None
 
-# Place market order using Unified Trading client
-# symbol example: "SUSDT"
+# Place market order using REST v5 API
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
     print("=== Place Order Called ===", symbol, side, qty, "reduce_only=", reduce_only)
+    # v5 endpoint
+    path = "/v5/order/create"
+    url = BASE_URL + path
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    # build payload
+    payload = {
+        "category": "linear",        # USDT perpetual
+        "symbol": symbol,
+        "side": side.capitalize(),   # 'Buy' or 'Sell'
+        "orderType": "Market",
+        "qty": str(qty),
+        "timeInForce": "ImmediateOrCancel",
+        "reduceOnly": reduce_only,
+    }
+    body = json.dumps(payload)
+    # sign v5: timestamp + api_key + recv_window + body
+    to_sign = ts + API_KEY + recv_window + body
+    sign = hmac.new(API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+        "Content-Type": "application/json",
+    }
+    r = requests.post(url, headers=headers, data=body)
     try:
-        # Unified Trading requires category parameter for derivatives
-        resp = client.place_active_order(
-            category="linear",  # USDT Perpetual
-            symbol=symbol,
-            side=side,
-            order_type="Market",
-            qty=qty,
-            time_in_force="ImmediateOrCancel",
-            reduce_only=reduce_only
-        )
-    except Exception as e:
-        print(f"Order placement exception: {e}")
-        resp = {"ret_code": -1, "ret_msg": str(e)}
-    send_telegram(f"{side} {symbol} qty={qty} → {resp}")
-    return resp
+        res = r.json()
+    except ValueError:
+        print("Order create non-JSON response:", r.status_code, r.text)
+        res = {"ret_code": -1, "ret_msg": r.text}
+    send_telegram(f"{side} {symbol} qty={qty} → {res}")
+    return res
 
 # Flask app
 app = Flask(__name__)
@@ -96,3 +115,4 @@ def webhook():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+```
