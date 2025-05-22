@@ -49,15 +49,17 @@ def get_balance() -> float:
     path = "/v5/account/wallet-balance"
     ts = str(int(time.time() * 1000))
     recv_window = "5000"
-    body = ""
-    sign = sign_v5(ts, recv_window, body)
+    # Query string for GET
+    query = "?category=linear"
+    # Sign with path and query
+    sign = sign_v5(ts, recv_window, path + query)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": sign,
     }
-    url = f"{BASE_URL}{path}?category=linear"
+    url = BASE_URL + path + query
     logger.debug(f"[Balance] Requesting balance: GET {url}")
     r = requests.get(url, headers=headers)
     logger.debug(f"[Balance] HTTP {r.status_code}: {r.text}")
@@ -74,6 +76,66 @@ def get_balance() -> float:
     return None
 
 # Get current mark price for symbol
+def get_mark_price(symbol: str) -> float:
+    path = "/v5/market/tickers"
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    # Query string for GET
+    query = f"?category=linear&symbol={symbol}"
+    # Sign with path and query
+    sign = sign_v5(ts, recv_window, path + query)
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+    }
+    url = BASE_URL + path + query
+    logger.debug(f"[Price] Requesting price: GET {url}")
+    r = requests.get(url, headers=headers)
+    logger.debug(f"[Price] HTTP {r.status_code}: {r.text}")
+    try:
+        items = r.json().get('result', {}).get('list', [])
+        if not items:
+            logger.warning("[Price] No price data returned")
+            return None
+        price = float(items[0].get('lastPrice', 0))
+        logger.info(f"[Price] {symbol} lastPrice: {price}")
+        return price
+    except Exception as e:
+        logger.error(f"[Price] Error parsing JSON: {e}")
+        return None
+
+# Get current position size
+def get_position_size(symbol: str) -> float:
+    path = "/v5/position/list"
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    query = f"?category=linear&symbol={symbol}"
+    # Sign with path and query
+    sign = sign_v5(ts, recv_window, path + query)
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+    }
+    url = BASE_URL + path + query
+    logger.debug(f"[Position] Requesting position: GET {url}")
+    r = requests.get(url, headers=headers)
+    logger.debug(f"[Position] HTTP {r.status_code}: {r.text}")
+    try:
+        result = r.json().get('result', {}).get('list', [])
+        if not result:
+            return 0.0
+        size = float(result[0].get('size', 0))
+        logger.info(f"[Position] {symbol} size: {size}")
+        return size
+    except Exception as e:
+        logger.error(f"[Position] Error parsing JSON: {e}")
+        return 0.0
+
+# Place a market order
 def get_mark_price(symbol: str) -> float:
     path = "/v5/market/tickers"
     ts = str(int(time.time() * 1000))
