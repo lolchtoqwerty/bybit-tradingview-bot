@@ -1,8 +1,9 @@
-# File: bot.py
+
 import os
 import time
 from flask import Flask, request, jsonify
-from pybit import HTTP
+from pybit import usdt_perpetual
+
 import requests
 
 # Load config from environment
@@ -13,7 +14,7 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Initialize Bybit HTTP client
-client = HTTP(
+client = usdt_perpetual.HTTP(
     endpoint=BASE_URL,
     api_key=API_KEY,
     api_secret=API_SECRET,
