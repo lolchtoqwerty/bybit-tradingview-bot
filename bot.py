@@ -18,13 +18,15 @@ app = Flask(__name__)
 
 # Helper: send message to Telegram
 def send_telegram(message: str):
+    print(f"[Telegram] Sending message: {message}")
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         try:
-            requests.post(url, json=payload)
+            resp = requests.post(url, json=payload)
+            print(f"[Telegram] response: {resp.status_code} {resp.text}")
         except Exception as e:
-            print(f"Telegram error: {e}")
+            print(f"[Telegram] error: {e}")
 
 # Helper: sign for Bybit v5
 def sign_v5(ts: str, recv_window: str, body: str) -> str:
@@ -45,16 +47,20 @@ def get_balance() -> float:
         "X-BAPI-SIGN": sign,
     }
     url = BASE_URL + path + "?category=linear"
+    print(f"[Balance] GET {url}")
     r = requests.get(url, headers=headers)
+    print(f"[Balance] status: {r.status_code}, text: {r.text}")
     try:
-        result = r.json().get('result', {}).get('list', [])
-        for entry in result:
+        data = r.json().get('result', {}).get('list', [])
+        for entry in data:
             if entry.get('coin') == 'USDT':
-                return float(entry.get('equity', 0))
-        print(f"USDT not found in wallet balance, response: {r.text}")
+                balance = float(entry.get('equity', 0))
+                print(f"[Balance] USDT equity: {balance}")
+                return balance
+        print("[Balance] USDT entry not found")
         return None
     except Exception as e:
-        print(f"Error fetching balance: {e}, response: {r.text}")
+        print(f"[Balance] error parsing JSON: {e}")
         return None
 
 # Get current mark price for symbol
@@ -70,13 +76,21 @@ def get_mark_price(symbol: str) -> float:
         "X-BAPI-SIGN": sign,
     }
     url = f"{BASE_URL}{path}?category=linear&symbol={symbol}"
+    print(f"[Price] GET {url}")
     r = requests.get(url, headers=headers)
-    resp = r.json()
-    lst = resp.get('result', {}).get('list', [])
-    if not lst:
-        print(f"Price fetch error, response: {resp}")
+    print(f"[Price] status: {r.status_code}, text: {r.text}")
+    try:
+        resp = r.json()
+        lst = resp.get('result', {}).get('list', [])
+        if not lst:
+            print(f"[Price] empty list")
+            return None
+        price = float(lst[0].get('lastPrice', 0))
+        print(f"[Price] lastPrice: {price}")
+        return price
+    except Exception as e:
+        print(f"[Price] error parsing JSON: {e}")
         return None
-    return float(lst[0].get('lastPrice', 0))
 
 # Get current position size
 def get_position_size(symbol: str) -> float:
@@ -91,11 +105,20 @@ def get_position_size(symbol: str) -> float:
         "X-BAPI-SIGN": sign,
     }
     url = f"{BASE_URL}{path}?category=linear&symbol={symbol}"
-    r = requests.get(url, headers=headers).json()
-    lst = r.get('result', {}).get('list', [])
-    if not lst:
+    print(f"[Position] GET {url}")
+    r = requests.get(url, headers=headers)
+    print(f"[Position] status: {r.status_code}, text: {r.text}")
+    try:
+        resp = r.json()
+        lst = resp.get('result', {}).get('list', [])
+        if not lst:
+            return 0.0
+        size = float(lst[0].get('size', 0))
+        print(f"[Position] size: {size}")
+        return size
+    except Exception as e:
+        print(f"[Position] error parsing JSON: {e}")
         return 0.0
-    return float(lst[0].get('size', 0))
 
 # Place a market order
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> dict:
@@ -103,7 +126,7 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> 
     if price:
         min_qty = math.ceil(5 / price)
         if qty < min_qty:
-            print(f"Qty {qty} < min {min_qty}, adjusting")
+            print(f"[Order] qty {qty} < min {min_qty}, adjusting")
             qty = min_qty
     path = "/v5/order/create"
     ts = str(int(time.time() * 1000))
@@ -126,7 +149,9 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> 
         "X-BAPI-SIGN": sign,
     }
     url = BASE_URL + path
+    print(f"[Order] POST {url} body={body}")
     r = requests.post(url, headers=headers, data=body)
+    print(f"[Order] status: {r.status_code}, text: {r.text}")
     try:
         res = r.json()
     except Exception:
@@ -138,6 +163,7 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True)
+    print(f"[Webhook] Received: {data}")
     symbol = data.get('symbol')
     side = data.get('side')
     qty = float(data.get('qty', 1))
@@ -158,9 +184,11 @@ def webhook():
         bal = get_balance()
         send_telegram(f"Баланс после шорта: {bal} USDT")
     else:
+        print(f"[Webhook] Unknown side: {side}")
         return jsonify(error="unknown side"), 400
     return jsonify(status="ok")
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
+    print(f"Starting app on port {port}")
     app.run(host='0.0.0.0', port=port)
