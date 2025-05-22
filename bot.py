@@ -19,189 +19,113 @@ BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-logger.debug(f"Config - BASE_URL: {BASE_URL}, TELEGRAM_CHAT_ID: {TELEGRAM_CHAT_ID is not None}")
+logger.debug(f"Config - BASE_URL: {BASE_URL}, TELEGRAM set: {bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)}")
 
 app = Flask(__name__)
 
-# Helper: send message to Telegram
+# Helper: send Telegram message
 def send_telegram(message: str):
-    logger.info(f"[Telegram] Sending message: {message}")
+    logger.info(f"[Telegram] Sending: {message}")
     if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
-        logger.warning("Telegram token or chat_id not set, skipping Telegram notification.")
+        logger.warning("Telegram config missing, skip sending")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    try:
-        resp = requests.post(url, json=payload)
-        logger.info(f"[Telegram] Response status: {resp.status_code}, body: {resp.text}")
-    except Exception as e:
-        logger.error(f"[Telegram] Error sending message: {e}")
+    resp = requests.post(url, json=payload)
+    logger.info(f"[Telegram] Response {resp.status_code}: {resp.text}")
 
-# Helper: sign for Bybit v5
-def sign_v5(ts: str, recv_window: str, body: str) -> str:
-    to_sign = ts + (API_KEY or "") + recv_window + body
-    signature = hmac.new(API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
-    logger.debug(f"[Auth] Signature: {signature}")
-    return signature
+# Auth signature
+def sign_v5(timestamp: str, recv_window: str, req_path: str, body: str = "") -> str:
+    msg = timestamp + (API_KEY or "") + recv_window + req_path + body
+    sig = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    logger.debug(f"[Auth] String to sign: {msg}")
+    logger.debug(f"[Auth] Signature: {sig}")
+    return sig
 
-# Get USDT wallet balance
-def get_balance() -> float:
-    path = "/v5/account/wallet-balance"
-    ts = str(int(time.time() * 1000))
+# Generic GET request
+def bybit_get(path: str, params: dict) -> dict:
+    timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    # Query string for GET
-    query = "?category=linear"
-    # Sign with path and query
-    sign = sign_v5(ts, recv_window, path + query)
+    query = '&'.join(f"{k}={v}" for k, v in params.items())
+    req_path = f"{path}?{query}"
+    signature = sign_v5(timestamp, recv_window, req_path)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": sign,
+        "X-BAPI-SIGN": signature,
     }
-    url = BASE_URL + path + query
-    logger.debug(f"[Balance] Requesting balance: GET {url}")
-    r = requests.get(url, headers=headers)
-    logger.debug(f"[Balance] HTTP {r.status_code}: {r.text}")
+    url = BASE_URL + req_path
+    logger.debug(f"[GET] {url}")
+    resp = requests.get(url, headers=headers)
+    logger.debug(f"[GET] status {resp.status_code}: {resp.text}")
     try:
-        data_list = r.json().get('result', {}).get('list', [])
-        for entry in data_list:
-            if entry.get('coin') == 'USDT':
-                balance = float(entry.get('equity', 0))
-                logger.info(f"[Balance] USDT equity: {balance}")
-                return balance
-        logger.warning("[Balance] USDT entry not found in response")
-    except Exception as e:
-        logger.error(f"[Balance] Error parsing response JSON: {e}")
+        return resp.json()
+    except Exception:
+        return {"ret_msg": resp.text}
+
+# Generic POST request
+def bybit_post(path: str, body: dict) -> dict:
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    req_path = path
+n    payload = json.dumps(body)
+    signature = sign_v5(timestamp, recv_window, req_path, payload)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": signature,
+    }
+    url = BASE_URL + path
+    logger.debug(f"[POST] {url} body {payload}")
+    resp = requests.post(url, headers=headers, data=payload)
+    logger.debug(f"[POST] status {resp.status_code}: {resp.text}")
+    try:
+        return resp.json()
+    except Exception:
+        return {"ret_msg": resp.text}
+
+# Business methods
+
+def get_balance() -> float:
+    data = bybit_get("/v5/account/wallet-balance", {"category": "linear"})
+    for entry in data.get('result', {}).get('list', []):
+        if entry.get('coin') == 'USDT':
+            balance = float(entry.get('equity', 0))
+            logger.info(f"[Balance] USDT equity {balance}")
+            return balance
+    logger.warning("[Balance] USDT not in wallet")
     return None
 
-# Get current mark price for symbol
 def get_mark_price(symbol: str) -> float:
-    path = "/v5/market/tickers"
-    ts = str(int(time.time() * 1000))
-    recv_window = "5000"
-    # Query string for GET
-    query = f"?category=linear&symbol={symbol}"
-    # Sign with path and query
-    sign = sign_v5(ts, recv_window, path + query)
-    headers = {
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": sign,
-    }
-    url = BASE_URL + path + query
-    logger.debug(f"[Price] Requesting price: GET {url}")
-    r = requests.get(url, headers=headers)
-    logger.debug(f"[Price] HTTP {r.status_code}: {r.text}")
-    try:
-        items = r.json().get('result', {}).get('list', [])
-        if not items:
-            logger.warning("[Price] No price data returned")
-            return None
-        price = float(items[0].get('lastPrice', 0))
-        logger.info(f"[Price] {symbol} lastPrice: {price}")
-        return price
-    except Exception as e:
-        logger.error(f"[Price] Error parsing JSON: {e}")
+    data = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": symbol})
+    items = data.get('result', {}).get('list', [])
+    if not items:
+        logger.warning("[Price] no data")
         return None
+    price = float(items[0].get('lastPrice', 0))
+    logger.info(f"[Price] {symbol} lastPrice {price}")
+    return price
 
-# Get current position size
 def get_position_size(symbol: str) -> float:
-    path = "/v5/position/list"
-    ts = str(int(time.time() * 1000))
-    recv_window = "5000"
-    query = f"?category=linear&symbol={symbol}"
-    # Sign with path and query
-    sign = sign_v5(ts, recv_window, path + query)
-    headers = {
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": sign,
-    }
-    url = BASE_URL + path + query
-    logger.debug(f"[Position] Requesting position: GET {url}")
-    r = requests.get(url, headers=headers)
-    logger.debug(f"[Position] HTTP {r.status_code}: {r.text}")
-    try:
-        result = r.json().get('result', {}).get('list', [])
-        if not result:
-            return 0.0
-        size = float(result[0].get('size', 0))
-        logger.info(f"[Position] {symbol} size: {size}")
-        return size
-    except Exception as e:
-        logger.error(f"[Position] Error parsing JSON: {e}")
+    data = bybit_get("/v5/position/list", {"category": "linear", "symbol": symbol})
+    items = data.get('result', {}).get('list', [])
+    if not items:
         return 0.0
+    size = float(items[0].get('size', 0))
+    logger.info(f"[Position] {symbol} size {size}")
+    return size
 
-# Place a market order
-def get_mark_price(symbol: str) -> float:
-    path = "/v5/market/tickers"
-    ts = str(int(time.time() * 1000))
-    recv_window = "5000"
-    sign = sign_v5(ts, recv_window, "")
-    headers = {
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": sign,
-    }
-    url = f"{BASE_URL}{path}?category=linear&symbol={symbol}"
-    logger.debug(f"[Price] Requesting price: GET {url}")
-    r = requests.get(url, headers=headers)
-    logger.debug(f"[Price] HTTP {r.status_code}: {r.text}")
-    try:
-        items = r.json().get('result', {}).get('list', [])
-        if not items:
-            logger.warning("[Price] No price data returned")
-            return None
-        price = float(items[0].get('lastPrice', 0))
-        logger.info(f"[Price] {symbol} lastPrice: {price}")
-        return price
-    except Exception as e:
-        logger.error(f"[Price] Error parsing JSON: {e}")
-        return None
-
-# Get current position size
-def get_position_size(symbol: str) -> float:
-    path = "/v5/position/list"
-    ts = str(int(time.time() * 1000))
-    recv_window = "5000"
-    sign = sign_v5(ts, recv_window, "")
-    headers = {
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": sign,
-    }
-    url = f"{BASE_URL}{path}?category=linear&symbol={symbol}"
-    logger.debug(f"[Position] Requesting position: GET {url}")
-    r = requests.get(url, headers=headers)
-    logger.debug(f"[Position] HTTP {r.status_code}: {r.text}")
-    try:
-        result = r.json().get('result', {}).get('list', [])
-        if not result:
-            return 0.0
-        size = float(result[0].get('size', 0))
-        logger.info(f"[Position] {symbol} size: {size}")
-        return size
-    except Exception as e:
-        logger.error(f"[Position] Error parsing JSON: {e}")
-        return 0.0
-
-# Place a market order
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> dict:
     price = get_mark_price(symbol)
     if price:
         min_qty = math.ceil(5 / price)
         if qty < min_qty:
-            logger.warning(f"[Order] qty {qty} less than min {min_qty}, adjusting to min")
+            logger.warning(f"[Order] adjust qty {qty}->{min_qty}")
             qty = min_qty
-    path = "/v5/order/create"
-    ts = str(int(time.time() * 1000))
-    recv_window = "5000"
-    payload = {
+    body = {
         "category": "linear",
         "symbol": symbol,
         "side": side.capitalize(),
@@ -210,62 +134,39 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> 
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only,
     }
-    body = json.dumps(payload)
-    logger.debug(f"[Order] Creating order: POST {path} body={body}")
-    sign = sign_v5(ts, recv_window, body)
-    headers = {
-        "Content-Type": "application/json",
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": sign,
-    }
-    url = BASE_URL + path
-    response = requests.post(url, headers=headers, data=body)
-    logger.info(f"[Order] HTTP {response.status_code}: {response.text}")
-    try:
-        res = response.json()
-    except Exception:
-        res = {"ret_code": -1, "ret_msg": response.text}
-    send_telegram(f"{side} {symbol} qty={qty} → {res}")
-    return res
+    result = bybit_post("/v5/order/create", body)
+    logger.info(f"[Order] {side} {symbol} qty {qty} => {result}")
+    send_telegram(f"{side} {symbol} qty={qty} → {result}")
+    return result
 
-# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True)
-    logger.debug(f"[Webhook] Received payload: {data}")
+    logger.debug(f"[Webhook] payload {data}")
     symbol = data.get('symbol')
     side = data.get('side')
     qty = float(data.get('qty', 1))
-    logger.info(f"[Webhook] Action: {side} {symbol} qty={qty}")
-    pos_size = get_position_size(symbol)
-    logger.debug(f"[Webhook] Current position size: {pos_size}")
-
+    pos = get_position_size(symbol)
+    logger.debug(f"[Webhook] current pos {pos}")
     if side == 'buy':
         place_order(symbol, 'Buy', qty)
     elif side == 'sell':
         place_order(symbol, 'Sell', qty)
     elif side == 'exit long':
-        if pos_size > 0:
+        if pos > 0:
             place_order(symbol, 'Sell', qty, reduce_only=True)
-        else:
-            logger.info("[Webhook] No long position to exit")
-        balance = get_balance()
-        send_telegram(f"Баланс после лонга: {balance} USDT")
+        bal = get_balance()
+        send_telegram(f"Баланс после лонга: {bal} USDT")
     elif side == 'exit short':
-        if pos_size < 0:
+        if pos < 0:
             place_order(symbol, 'Buy', qty, reduce_only=True)
-        else:
-            logger.info("[Webhook] No short position to exit")
-        balance = get_balance()
-        send_telegram(f"Баланс после шорта: {balance} USDT")
+        bal = get_balance()
+        send_telegram(f"Баланс после шорта: {bal} USDT")
     else:
-        logger.error(f"[Webhook] Unknown side: {side}")
         return jsonify(error="unknown side"), 400
     return jsonify(status="ok")
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-    logger.info(f"Starting app on port {port}")
+    logger.info(f"Starting on port {port}")
     app.run(host='0.0.0.0', port=port)
