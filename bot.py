@@ -36,19 +36,26 @@ def get_balance() -> float:
     path = "/v5/account/wallet-balance"
     ts = str(int(time.time() * 1000))
     recv_window = "5000"
-    query = "?category=linear&coin=USDT"
-    sign = sign_v5(ts, recv_window, "")
+    body = ""
+    sign = sign_v5(ts, recv_window, body)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": sign,
     }
-    url = BASE_URL + path + query
+    url = BASE_URL + path + "?category=linear"
     r = requests.get(url, headers=headers)
-    data = r.json()
-    balance = data.get('result', {}).get('USDT', {}).get('equity')
-    return float(balance) if balance is not None else None
+    try:
+        result = r.json().get('result', {}).get('list', [])
+        for entry in result:
+            if entry.get('coin') == 'USDT':
+                return float(entry.get('equity', 0))
+        print(f"USDT not found in wallet balance, response: {r.text}")
+        return None
+    except Exception as e:
+        print(f"Error fetching balance: {e}, response: {r.text}")
+        return None
 
 # Get current mark price for symbol
 def get_mark_price(symbol: str) -> float:
