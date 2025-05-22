@@ -1,26 +1,19 @@
-```python
-# File: bot.py
 import os
 import time
+import hmac
+import hashlib
+import json
 from flask import Flask, request, jsonify
-from pybit.unified_trading import HTTP
 import requests
 
-# Load config from environment
+# Загружаем конфигурацию из переменных окружения
 API_KEY    = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
+BASE_URL   = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Initialize Bybit Unified Trading HTTP client for USDT Perpetual
-client = HTTP(
-    testnet=True,
-    api_key=API_KEY,
-    api_secret=API_SECRET,
-    recv_window=5000
-)
-
-# Telegram helper
+# Функция отправки сообщений в Telegram
 def send_telegram(message: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -28,71 +21,86 @@ def send_telegram(message: str):
         try:
             requests.post(url, json=payload)
         except Exception as e:
-            print(f"Telegram error: {e}")
+            print(f"Ошибка Telegram: {e}")
 
-# Fetch wallet balance for USDT
+# Функция для подписи запросов v5 API
+def sign_v5(ts: str, recv_window: str, body: str) -> str:
+    to_sign = ts + API_KEY + recv_window + body
+    return hmac.new(API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
+
+# Получение баланса кошелька (USDT)
 def get_balance(currency="USDT"):
-    try:
-        resp = client.get_wallet_balance(category="linear", coin=currency)
-        return resp.get('result', {}).get(currency, {}).get('wallet_balance')
-    except Exception as e:
-        print(f"Balance fetch error: {e}")
-        return None
-
-# Place market order using REST v5 API
-def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
-    print("=== Place Order Called ===", symbol, side, qty, "reduce_only=", reduce_only)
-    # v5 endpoint
-    path = "/v5/order/create"
-    url = BASE_URL + path
+    path = "/v5/account/wallet-balance"
     ts = str(int(time.time() * 1000))
     recv_window = "5000"
-    # build payload
+    query = f"?category=linear&coin={currency}"
+    body = ""
+    sign = sign_v5(ts, recv_window, body)
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+    }
+    url = BASE_URL + path + query
+    response = requests.get(url, headers=headers)
+    try:
+        result = response.json()
+        return result.get('result', {}).get(currency, {}).get('equity')
+    except Exception as e:
+        print(f"Ошибка получения баланса: {e}, код={response.status_code}, тело={response.text}")
+        return None
+
+# Размещение рыночного ордера через v5 API
+def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
+    print("=== Вызов ордера ===", symbol, side, qty, "reduce_only=", reduce_only)
+    path = "/v5/order/create"
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
     payload = {
-        "category": "linear",        # USDT perpetual
+        "category": "linear",
         "symbol": symbol,
-        "side": side.capitalize(),   # 'Buy' or 'Sell'
+        "side": side.capitalize(),
         "orderType": "Market",
         "qty": str(qty),
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only,
     }
     body = json.dumps(payload)
-    # sign v5: timestamp + api_key + recv_window + body
-    to_sign = ts + API_KEY + recv_window + body
-    sign = hmac.new(API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
+    sign = sign_v5(ts, recv_window, body)
     headers = {
+        "Content-Type": "application/json",
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": sign,
-        "Content-Type": "application/json",
     }
-    r = requests.post(url, headers=headers, data=body)
+    url = BASE_URL + path
+    response = requests.post(url, headers=headers, data=body)
     try:
-        res = r.json()
-    except ValueError:
-        print("Order create non-JSON response:", r.status_code, r.text)
-        res = {"ret_code": -1, "ret_msg": r.text}
-    send_telegram(f"{side} {symbol} qty={qty} → {res}")
-    return res
+        result = response.json()
+    except Exception:
+        result = {"ret_code": -1, "ret_msg": response.text}
+    send_telegram(f"{side} {symbol} qty={qty} → {result}")
+    return result
 
-# Flask app
+# Инициализация Flask приложения
 app = Flask(__name__)
 
+# Обработчик вебхука от TradingView
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    print("=== GOT WEBHOOK ===", request.data)
+    print("=== Получен вебхук ===", request.data)
     try:
         data = request.get_json(force=True)
-        print("Parsed JSON:", data)
+        print("Разобранный JSON:", data)
     except Exception as e:
-        print("JSON parse error:", e)
+        print(f"Ошибка парсинга JSON: {e}")
         return jsonify({"error": "invalid JSON"}), 400
 
     symbol = data.get('symbol')
     side   = data.get('side')
-    qty    = data.get('qty', 1)
+    qty    = float(data.get('qty', 1))
 
     if side == 'buy':
         place_order(symbol, 'Buy', qty)
@@ -101,18 +109,18 @@ def webhook():
     elif side == 'exit long':
         place_order(symbol, 'Sell', qty, reduce_only=True)
         bal = get_balance()
-        send_telegram(f"Balance after exit long: {bal} {symbol}")
+        send_telegram(f"Баланс после закрытия лонга: {bal} USDT")
     elif side == 'exit short':
         place_order(symbol, 'Buy', qty, reduce_only=True)
         bal = get_balance()
-        send_telegram(f"Balance after exit short: {bal} {symbol}")
+        send_telegram(f"Баланс после закрытия шорта: {bal} USDT")
     else:
-        print("Unknown side:", side)
+        print(f"Неизвестный side: {side}")
         return jsonify({"error": "unknown side"}), 400
 
     return jsonify({"status": "ok"})
 
+# Запуск приложения
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-```
