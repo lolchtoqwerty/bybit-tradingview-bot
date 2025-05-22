@@ -43,14 +43,11 @@ def sign_v5(timestamp: str, recv_window: str, req_path: str, body: str = "") -> 
     return sig
 
 # Generic GET request
-# Generic GET request
 def bybit_get(path: str, params: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    # Build query string
     query = '&'.join(f"{k}={v}" for k, v in params.items())
-    # Strip leading slash for signature
-    req_path_for_sign = path.lstrip('/') + f"?{query}"
+    req_path_for_sign = path + f"?{query}"
     signature = sign_v5(timestamp, recv_window, req_path_for_sign)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -58,7 +55,7 @@ def bybit_get(path: str, params: dict) -> dict:
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": signature,
     }
-    url = BASE_URL + path + f"?{query}"
+    url = BASE_URL + req_path_for_sign
     logger.debug(f"[GET] {url} signing path: {req_path_for_sign}")
     resp = requests.get(url, headers=headers)
     logger.debug(f"[GET] status {resp.status_code}: {resp.text}")
@@ -71,8 +68,7 @@ def bybit_get(path: str, params: dict) -> dict:
 def bybit_post(path: str, body: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    # Strip leading slash for signature
-    req_path_for_sign = path.lstrip('/')
+    req_path_for_sign = path
     payload = json.dumps(body)
     signature = sign_v5(timestamp, recv_window, req_path_for_sign, payload)
     headers = {
@@ -92,30 +88,6 @@ def bybit_post(path: str, body: dict) -> dict:
         return {"ret_msg": resp.text}
 
 # Business methods
-def bybit_post(path: str, body: dict) -> dict:
-    timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
-    req_path = path
-    payload = json.dumps(body)
-    signature = sign_v5(timestamp, recv_window, req_path, payload)
-    headers = {
-        "Content-Type": "application/json",
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": signature,
-    }
-    url = BASE_URL + path
-    logger.debug(f"[POST] {url} body {payload}")
-    resp = requests.post(url, headers=headers, data=payload)
-    logger.debug(f"[POST] status {resp.status_code}: {resp.text}")
-    try:
-        return resp.json()
-    except Exception:
-        return {"ret_msg": resp.text}
-
-# Business methods
-
 def get_balance() -> float:
     data = bybit_get("/v5/account/wallet-balance", {"category": "linear"})
     for entry in data.get('result', {}).get('list', []):
