@@ -57,9 +57,10 @@ def get_balance():
 
 # Получение цены для расчёта минимального объёма
 def get_mark_price(symbol: str):
-    path = "/v5/market/tickers"  # исправленный endpoint
+    path = "/v5/market/tickers"
     ts = str(int(time.time() * 1000))
     recv_window = "5000"
+    # Для линейных USDT perpetual указываем category=linear
     sign = sign_v5(ts, recv_window, "")
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -67,13 +68,16 @@ def get_mark_price(symbol: str):
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": sign,
     }
-    url = BASE_URL + path + f"?symbol={symbol}"
+    url = BASE_URL + path + f"?category=linear&symbol={symbol}"
     r = requests.get(url, headers=headers)
     try:
-        item = r.json().get('result', {}).get('list', [])[0]
+        data_list = r.json().get('result', {}).get('list', [])
+        if not data_list:
+            raise ValueError(f"Empty price list, response: {r.text}")
+        item = data_list[0]
         return float(item.get('lastPrice', 0))
     except Exception as e:
-        print(f"Ошибка получения цены: {e}, ответ: {r.text}")
+        print(f"Ошибка получения цены: {e}")
         return None
 
 # Размещение рыночного ордера
