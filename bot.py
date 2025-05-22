@@ -46,8 +46,10 @@ def sign_v5(timestamp: str, recv_window: str, req_path: str, body: str = "") -> 
 def bybit_get(path: str, params: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
+    # Build query string
     query = '&'.join(f"{k}={v}" for k, v in params.items())
-    req_path_for_sign = path + f"?{query}"
+    # For GET, signature uses only query parameters
+    req_path_for_sign = query
     signature = sign_v5(timestamp, recv_window, req_path_for_sign)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -55,7 +57,7 @@ def bybit_get(path: str, params: dict) -> dict:
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": signature,
     }
-    url = BASE_URL + req_path_for_sign
+    url = BASE_URL + path + f"?{query}"
     logger.debug(f"[GET] {url} signing path: {req_path_for_sign}")
     resp = requests.get(url, headers=headers)
     logger.debug(f"[GET] status {resp.status_code}: {resp.text}")
@@ -65,6 +67,30 @@ def bybit_get(path: str, params: dict) -> dict:
         return {"ret_msg": resp.text}
 
 # Generic POST request
+def bybit_post(path: str, body: dict) -> dict:
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    # Remove leading slash for POST signature
+    req_path_for_sign = path.lstrip('/')
+    payload = json.dumps(body)
+    signature = sign_v5(timestamp, recv_window, req_path_for_sign, payload)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": signature,
+    }
+    url = BASE_URL + path
+    logger.debug(f"[POST] {url} signing path: {req_path_for_sign} body {payload}")
+    resp = requests.post(url, headers=headers, data=payload)
+    logger.debug(f"[POST] status {resp.status_code}: {resp.text}")
+    try:
+        return resp.json()
+    except Exception:
+        return {"ret_msg": resp.text}
+
+# Business methods
 def bybit_post(path: str, body: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
