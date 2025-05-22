@@ -1,8 +1,8 @@
+# File: bot.py
 import os
 import time
-import hmac
-import hashlib
 from flask import Flask, request, jsonify
+from pybit import HTTP
 import requests
 
 # Load config from environment
@@ -11,6 +11,14 @@ API_SECRET = os.getenv("BYBIT_API_SECRET")
 BASE_URL   = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Initialize Bybit HTTP client
+client = HTTP(
+    endpoint=BASE_URL,
+    api_key=API_KEY,
+    api_secret=API_SECRET,
+    recv_window=5000,
+)
 
 # Telegram helper
 def send_telegram(message: str):
@@ -22,55 +30,35 @@ def send_telegram(message: str):
         except Exception as e:
             print(f"Telegram error: {e}")
 
-# Sign parameters for Bybit (HMAC SHA256)
-def sign_params(params: dict) -> str:
-    sign_str = '&'.join(f"{k}={v}" for k,v in sorted(params.items()))
-    return hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
-
-# Fetch wallet balance for USDT perpetual (linear)
+# Fetch wallet balance
 def get_balance(currency="USDT"):
-    path   = "/v2/private/wallet/balance"
-    ts     = int(time.time() * 1000)
-    params = {"api_key": API_KEY, "timestamp": ts}
-    params["sign"] = sign_params(params)
-    r = requests.get(BASE_URL + path, params=params)
     try:
-        data = r.json().get("result", {})
-        return data.get(currency, {}).get("wallet_balance")
-    except ValueError:
-        print("Balance fetch non-JSON:", r.status_code, r.text)
+        bal = client.get_wallet_balance(coin=currency)
+        return bal.get('result', {}).get(currency, {}).get('wallet_balance')
+    except Exception as e:
+        print(f"Balance fetch error: {e}")
         return None
 
-# Place market order for USDT linear perpetual
-# Use unified linear endpoint instead of v2 inverse
-
+# Place market order using pybit
+# symbol example: "SUSDT"
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
     print("=== Place Order Called ===", symbol, side, qty, "reduce_only=", reduce_only)
-    path   = "/private/linear/order/create"
-    ts     = int(time.time() * 1000)
-    # all params must be included in signature
-    params = {
-        "api_key": API_KEY,
-        "symbol": symbol,
-        "side": side.upper(),
-        "order_type": "Market",
-        "qty": qty,
-        "time_in_force": "ImmediateOrCancel",
-        "reduce_only": str(reduce_only).lower(),
-        "timestamp": ts,
-    }
-    params["sign"] = sign_params(params)
-    # send as query parameters
-    resp = requests.post(BASE_URL + path, params=params, timeout=10)
     try:
-        res = resp.json()
-    except ValueError:
-        print("Order create non-JSON response:", resp.status_code, resp.text)
-        res = {"ret_code": -1, "ret_msg": resp.text}
-    send_telegram(f"{side} {symbol} qty={qty} → {res}")
-    return res
+        resp = client.place_active_order(
+            symbol=symbol,
+            side=side,
+            order_type="Market",
+            qty=qty,
+            time_in_force="ImmediateOrCancel",
+            reduce_only=reduce_only
+        )
+    except Exception as e:
+        print(f"Order placement exception: {e}")
+        resp = {"ret_code": -1, "ret_msg": str(e)}
+    send_telegram(f"{side} {symbol} qty={qty} → {resp}")
+    return resp
 
-# Initialize Flask app
+# Flask app
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
