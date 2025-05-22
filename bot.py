@@ -60,7 +60,6 @@ def get_mark_price(symbol: str):
     path = "/v5/market/tickers"
     ts = str(int(time.time() * 1000))
     recv_window = "5000"
-    # Для линейных USDT perpetual указываем category=linear
     sign = sign_v5(ts, recv_window, "")
     headers = {
         "X-BAPI-API-KEY": API_KEY,
