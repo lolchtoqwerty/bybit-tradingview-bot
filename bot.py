@@ -57,7 +57,7 @@ def get_balance():
 
 # Получение цены для расчёта минимального объёма
 def get_mark_price(symbol: str):
-    path = "/v5/market/tick"
+    path = "/v5/market/tickers"  # исправленный endpoint
     ts = str(int(time.time() * 1000))
     recv_window = "5000"
     sign = sign_v5(ts, recv_window, "")
@@ -70,10 +70,10 @@ def get_mark_price(symbol: str):
     url = BASE_URL + path + f"?symbol={symbol}"
     r = requests.get(url, headers=headers)
     try:
-        data = r.json().get('result', {}).get('list', [])[0]
-        return float(data.get('lastPrice', 0))
+        item = r.json().get('result', {}).get('list', [])[0]
+        return float(item.get('lastPrice', 0))
     except Exception as e:
-        print(f"Ошибка цены: {e}")
+        print(f"Ошибка получения цены: {e}, ответ: {r.text}")
         return None
 
 # Размещение рыночного ордера
