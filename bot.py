@@ -16,97 +16,144 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 app = Flask(__name__)
 
+# Helper: send message to Telegram
 def send_telegram(message: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message}
-        )
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        try:
+            requests.post(url, json=payload)
+        except Exception as e:
+            print(f"Telegram error: {e}")
 
-def sign_v5(ts, recv_window, body):
-    return hmac.new(
-        API_SECRET.encode(), 
-        (ts + API_KEY + recv_window + body).encode(),
-        hashlib.sha256
-    ).hexdigest()
+# Helper: sign for Bybit v5
+def sign_v5(ts: str, recv_window: str, body: str) -> str:
+    to_sign = ts + API_KEY + recv_window + body
+    return hmac.new(API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
 
-def get_balance():
-    path, ts, recv = "/v5/account/wallet-balance", str(int(time.time()*1000)), "5000"
-    sign = sign_v5(ts, recv, "")
-    headers = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv, "X-BAPI-SIGN": sign}
-    res = requests.get(BASE_URL+path+"?category=linear&coin=USDT", headers=headers).json()
-    return res.get('result', {}).get('USDT', {}).get('equity')
+# Get USDT wallet balance
+def get_balance() -> float:
+    path = "/v5/account/wallet-balance"
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    query = "?category=linear&coin=USDT"
+    sign = sign_v5(ts, recv_window, "")
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+    }
+    url = BASE_URL + path + query
+    r = requests.get(url, headers=headers)
+    data = r.json()
+    balance = data.get('result', {}).get('USDT', {}).get('equity')
+    return float(balance) if balance is not None else None
 
-def get_mark_price(sym):
-    path, ts, recv = "/v5/market/tickers", str(int(time.time()*1000)), "5000"
-    sign = sign_v5(ts, recv, "")
-    hdr = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv, "X-BAPI-SIGN": sign}
-    j = requests.get(f"{BASE_URL}{path}?category=linear&symbol={sym}", headers=hdr).json()
-    lst = j.get('result', {}).get('list', [])
-    return float(lst[0]['lastPrice']) if lst else None
+# Get current mark price for symbol
+def get_mark_price(symbol: str) -> float:
+    path = "/v5/market/tickers"
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    sign = sign_v5(ts, recv_window, "")
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+    }
+    url = f"{BASE_URL}{path}?category=linear&symbol={symbol}"
+    r = requests.get(url, headers=headers)
+    resp = r.json()
+    lst = resp.get('result', {}).get('list', [])
+    if not lst:
+        print(f"Price fetch error, response: {resp}")
+        return None
+    return float(lst[0].get('lastPrice', 0))
 
-def place_order(symbol, side, qty, reduce_only=False):
+# Get current position size
+def get_position_size(symbol: str) -> float:
+    path = "/v5/position/list"
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    sign = sign_v5(ts, recv_window, "")
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+    }
+    url = f"{BASE_URL}{path}?category=linear&symbol={symbol}"
+    r = requests.get(url, headers=headers).json()
+    lst = r.get('result', {}).get('list', [])
+    if not lst:
+        return 0.0
+    return float(lst[0].get('size', 0))
+
+# Place a market order
+def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> dict:
     price = get_mark_price(symbol)
     if price:
-        minq = math.ceil(5/price)
-        qty = minq if qty<minq else qty
-    path, ts, recv = "/v5/order/create", str(int(time.time()*1000)), "5000"
-    payload = json.dumps({"category":"linear","symbol":symbol,"side":side.capitalize(),"orderType":"Market","qty":str(qty),"timeInForce":"ImmediateOrCancel","reduceOnly":reduce_only})
-    sign = sign_v5(ts, recv, payload)
-    hdr = {"Content-Type":"application/json","X-BAPI-API-KEY":API_KEY,"X-BAPI-TIMESTAMP":ts,"X-BAPI-RECV-WINDOW":recv,"X-BAPI-SIGN":sign}
-    res = requests.post(BASE_URL+path, headers=hdr, data=payload).json()
+        min_qty = math.ceil(5 / price)
+        if qty < min_qty:
+            print(f"Qty {qty} < min {min_qty}, adjusting")
+            qty = min_qty
+    path = "/v5/order/create"
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    body = json.dumps({
+        "category": "linear",
+        "symbol": symbol,
+        "side": side.capitalize(),
+        "orderType": "Market",
+        "qty": str(qty),
+        "timeInForce": "ImmediateOrCancel",
+        "reduceOnly": reduce_only,
+    })
+    sign = sign_v5(ts, recv_window, body)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": sign,
+    }
+    url = BASE_URL + path
+    r = requests.post(url, headers=headers, data=body)
+    try:
+        res = r.json()
+    except Exception:
+        res = {"ret_code": -1, "ret_msg": r.text}
     send_telegram(f"{side} {symbol} qty={qty} → {res}")
     return res
 
-@app.route('/webhook', methods=['POST'])
+# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True)
-    sym, sd, qt = data['symbol'], data['side'], float(data.get('qty',1))
-    # Получаем текущую позицию
-    def get_position(symbol: str):
-        path = "/v5/position/list"
-        ts = str(int(time.time() * 1000))
-        recv_window = "5000"
-        sign = sign_v5(ts, recv_window, "")
-        headers = {
-            "X-BAPI-API-KEY": API_KEY,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": recv_window,
-            "X-BAPI-SIGN": sign,
-        }
-        url = BASE_URL + path + f"?category=linear&symbol={symbol}"
-        r = requests.get(url, headers=headers).json()
-        lst = r.get('result', {}).get('list', [])
-        return lst[0] if lst else None
+    symbol = data.get('symbol')
+    side = data.get('side')
+    qty = float(data.get('qty', 1))
+    pos_size = get_position_size(symbol)
 
-    pos = get_position(sym)
-    size = float(pos.get('size', 0)) if pos else 0
-
-    if sd == 'buy':
-        place_order(sym,'Buy',qt)
-    elif sd == 'sell':
-        place_order(sym,'Sell',qt)
-    elif sd == 'exit long':
-        # закрыть лонг только если есть положительная позиция
-        if size > 0:
-            place_order(sym,'Sell',qt,True)
-        send_telegram(f"Баланс после лонга: {get_balance()} USDT")
-    elif sd == 'exit short':
-        # закрыть шорт только если есть отрицательная позиция
-        if size < 0:
-            place_order(sym,'Buy',qt,True)
-        send_telegram(f"Баланс после шорта: {get_balance()} USDT")
+    if side == 'buy':
+        place_order(symbol, 'Buy', qty)
+    elif side == 'sell':
+        place_order(symbol, 'Sell', qty)
+    elif side == 'exit long':
+        if pos_size > 0:
+            place_order(symbol, 'Sell', qty, reduce_only=True)
+        bal = get_balance()
+        send_telegram(f"Баланс после лонга: {bal} USDT")
+    elif side == 'exit short':
+        if pos_size < 0:
+            place_order(symbol, 'Buy', qty, reduce_only=True)
+        bal = get_balance()
+        send_telegram(f"Баланс после шорта: {bal} USDT")
     else:
-        return jsonify(error="unknown side"),400
-    return jsonify(status="ok")
-    data = request.get_json(force=True)
-    sym, sd, qt = data['symbol'], data['side'], float(data.get('qty',1))
-    if sd=='buy': place_order(sym,'Buy',qt)
-    elif sd=='sell': place_order(sym,'Sell',qt)
-    elif sd=='exit long': place_order(sym,'Sell',qt,True); send_telegram(f"Баланс после лонга: {get_balance()} USDT")
-    elif sd=='exit short': place_order(sym,'Buy',qt,True); send_telegram(f"Баланс после шорта: {get_balance()} USDT")
-    else: return jsonify(error="unknown side"),400
+        return jsonify(error="unknown side"), 400
     return jsonify(status="ok")
 
-if __name__=='__main__': app.run(host='0.0.0.0', port=int(os.getenv('PORT',5000)))
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
