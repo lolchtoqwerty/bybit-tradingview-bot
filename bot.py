@@ -34,7 +34,7 @@ def send_telegram(message: str):
     resp = requests.post(url, json=payload)
     logger.info(f"[Telegram] Response {resp.status_code}: {resp.text}")
 
-# Auth signature
+# Auth signature for v5 API
 def sign_v5(timestamp: str, recv_window: str, req_path: str, body: str = "") -> str:
     msg = timestamp + (API_KEY or "") + recv_window + req_path + body
     sig = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
@@ -48,9 +48,8 @@ def bybit_get(path: str, params: dict) -> dict:
     recv_window = "5000"
     # Build query string
     query = '&'.join(f"{k}={v}" for k, v in params.items())
-    # For GET, signature uses only query parameters
-    req_path_for_sign = query
-    signature = sign_v5(timestamp, recv_window, req_path_for_sign)
+    # Signature for GET uses only query string
+    signature = sign_v5(timestamp, recv_window, query)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": timestamp,
@@ -58,7 +57,7 @@ def bybit_get(path: str, params: dict) -> dict:
         "X-BAPI-SIGN": signature,
     }
     url = BASE_URL + path + f"?{query}"
-    logger.debug(f"[GET] {url} signing path: {req_path_for_sign}")
+    logger.debug(f"[GET] {url} signing path: {query}")
     resp = requests.get(url, headers=headers)
     logger.debug(f"[GET] status {resp.status_code}: {resp.text}")
     try:
@@ -70,10 +69,10 @@ def bybit_get(path: str, params: dict) -> dict:
 def bybit_post(path: str, body: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    # Remove leading slash for POST signature
-    req_path_for_sign = path.lstrip('/')
+    # For POST, signature path excludes leading slash
+    req_path = path.lstrip('/')
     payload = json.dumps(body)
-    signature = sign_v5(timestamp, recv_window, req_path_for_sign, payload)
+    signature = sign_v5(timestamp, recv_window, req_path, payload)
     headers = {
         "Content-Type": "application/json",
         "X-BAPI-API-KEY": API_KEY,
@@ -82,7 +81,7 @@ def bybit_post(path: str, body: dict) -> dict:
         "X-BAPI-SIGN": signature,
     }
     url = BASE_URL + path
-    logger.debug(f"[POST] {url} signing path: {req_path_for_sign} body {payload}")
+    logger.debug(f"[POST] {url} signing path: {req_path} body {payload}")
     resp = requests.post(url, headers=headers, data=payload)
     logger.debug(f"[POST] status {resp.status_code}: {resp.text}")
     try:
@@ -90,32 +89,10 @@ def bybit_post(path: str, body: dict) -> dict:
     except Exception:
         return {"ret_msg": resp.text}
 
-# Business methods
-def bybit_post(path: str, body: dict) -> dict:
-    timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
-    req_path_for_sign = path
-    payload = json.dumps(body)
-    signature = sign_v5(timestamp, recv_window, req_path_for_sign, payload)
-    headers = {
-        "Content-Type": "application/json",
-        "X-BAPI-API-KEY": API_KEY,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": recv_window,
-        "X-BAPI-SIGN": signature,
-    }
-    url = BASE_URL + path
-    logger.debug(f"[POST] {url} signing path: {req_path_for_sign} body {payload}")
-    resp = requests.post(url, headers=headers, data=payload)
-    logger.debug(f"[POST] status {resp.status_code}: {resp.text}")
-    try:
-        return resp.json()
-    except Exception:
-        return {"ret_msg": resp.text}
-
-# Business methods
+# Business helpers
 def get_balance() -> float:
-    data = bybit_get("/v5/account/wallet-balance", {"category": "linear"})
+    # accountType required by API: choose UNIFIED, CONTRACT, or SPOT
+    data = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
     for entry in data.get('result', {}).get('list', []):
         if entry.get('coin') == 'USDT':
             balance = float(entry.get('equity', 0))
@@ -146,6 +123,7 @@ def get_position_size(symbol: str) -> float:
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> dict:
     price = get_mark_price(symbol)
     if price:
+        # enforce minimum 5 USDT notional
         min_qty = math.ceil(5 / price)
         if qty < min_qty:
             logger.warning(f"[Order] adjust qty {qty}->{min_qty}")
@@ -169,9 +147,9 @@ def webhook():
     data = request.get_json(force=True)
     logger.debug(f"[Webhook] payload {data}")
     symbol = data.get('symbol')
-    side = data.get('side')
-    qty = float(data.get('qty', 1))
-    pos = get_position_size(symbol)
+    side   = data.get('side')
+    qty    = float(data.get('qty', 1))
+    pos    = get_position_size(symbol)
     logger.debug(f"[Webhook] current pos {pos}")
     if side == 'buy':
         place_order(symbol, 'Buy', qty)
