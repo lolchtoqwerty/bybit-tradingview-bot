@@ -43,12 +43,16 @@ def sign_v5(timestamp: str, recv_window: str, request_path: str, body: str = "")
     return sig
 
 # Generic GET request
+# Sign only the query string (as observed by API error origin_string)
 def bybit_get(path: str, params: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
+    # build query
     query = '&'.join(f"{k}={v}" for k, v in params.items())
+    # full request path for URL
     request_path = path + '?' + query
-    signature = sign_v5(timestamp, recv_window, request_path)
+    # sign only the query string
+    signature = sign_v5(timestamp, recv_window, query)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": timestamp,
@@ -56,7 +60,7 @@ def bybit_get(path: str, params: dict) -> dict:
         "X-BAPI-SIGN": signature,
     }
     url = BASE_URL + request_path
-    logger.debug(f"[GET] {url} signing path: {request_path}")
+    logger.debug(f"[GET] {url} signing query: {query}")
     resp = requests.get(url, headers=headers)
     logger.debug(f"[GET] status {resp.status_code}: {resp.text}")
     try:
@@ -65,11 +69,12 @@ def bybit_get(path: str, params: dict) -> dict:
         return {"ret_msg": resp.text}
 
 # Generic POST request
+# Body is compact JSON
 def bybit_post(path: str, body: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    # Use compact JSON without spaces for signing
     payload = json.dumps(body, separators=(',',':'))
+    # use full path for signing
     request_path = path
     signature = sign_v5(timestamp, recv_window, request_path, payload)
     headers = {
@@ -89,8 +94,10 @@ def bybit_post(path: str, body: dict) -> dict:
         return {"ret_msg": resp.text}
 
 # Business helpers
+
 def get_balance() -> float:
-    data = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"})
+    # include coin filter
+    data = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
     accounts = data.get('result', {}).get('list', [])
     for acct in accounts:
         for c in acct.get('coin', []):
@@ -101,6 +108,7 @@ def get_balance() -> float:
     logger.warning("[Balance] USDT not found in wallet data")
     return None
 
+
 def get_mark_price(symbol: str) -> float:
     data = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": symbol})
     lst = data.get('result', {}).get('list', [])
@@ -110,6 +118,7 @@ def get_mark_price(symbol: str) -> float:
     price = float(lst[0].get('lastPrice', 0))
     logger.info(f"[Price] {symbol} lastPrice {price}")
     return price
+
 
 def get_position_size(symbol: str) -> float:
     data = bybit_get("/v5/position/list", {"category": "linear", "symbol": symbol})
@@ -122,6 +131,7 @@ def get_position_size(symbol: str) -> float:
     signed = -size if side_str == 'sell' else size
     logger.info(f"[Position] {symbol} size {size} side {side_str} signed {signed}")
     return signed
+
 
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> dict:
     price = get_mark_price(symbol)
