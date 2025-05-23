@@ -122,8 +122,8 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         price = get_ticker_price(symbol)
         qty_contracts = max(min_c, step * floor(notional / (price * step)))
     elif reduce_only:
-        opposite = 'Buy' if side == 'Sell' else 'Sell'
-        qty_contracts = get_position_qty(symbol, opposite)
+        # for full close, use qty=0 and closeOnTrigger
+        qty_contracts = 0
     else:
         qty_contracts = qty
 
@@ -138,6 +138,7 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         "reduceOnly": reduce_only
     }
     if reduce_only:
+        body["closeOnTrigger"] = True
         body["positionIdx"] = 0
 
     resp = http_post("v5/order/create", body)
