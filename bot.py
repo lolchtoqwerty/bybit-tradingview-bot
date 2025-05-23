@@ -91,14 +91,17 @@ def bybit_post(path: str, body: dict) -> dict:
 
 # Business helpers
 def get_balance() -> float:
-    # accountType required by API: choose UNIFIED, CONTRACT, or SPOT
-    data = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
-    for entry in data.get('result', {}).get('list', []):
-        if entry.get('coin') == 'USDT':
-            balance = float(entry.get('equity', 0))
-            logger.info(f"[Balance] USDT equity {balance}")
-            return balance
-    logger.warning("[Balance] USDT not in wallet")
+    # Получаем баланс всех монет в аккаунте UNIFIED
+    data = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"})
+    accounts = data.get('result', {}).get('list', [])
+    for acct in accounts:
+        coins = acct.get('coin', [])
+        for c in coins:
+            if c.get('coin') == 'USDT':
+                balance = float(c.get('walletBalance', 0))
+                logger.info(f"[Balance] USDT walletBalance {balance}")
+                return balance
+    logger.warning("[Balance] USDT not found in wallet data")
     return None
 
 def get_mark_price(symbol: str) -> float:
