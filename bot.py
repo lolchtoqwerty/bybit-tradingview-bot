@@ -13,42 +13,43 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(m
 logger = logging.getLogger(__name__)
 
 # Конфиг из окружения
-API_KEY         = os.getenv("BYBIT_API_KEY")
-API_SECRET      = os.getenv("BYBIT_API_SECRET")
-BASE_URL        = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
-TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+API_KEY          = os.getenv("BYBIT_API_KEY")
+API_SECRET       = os.getenv("BYBIT_API_SECRET")
+BASE_URL         = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 app = Flask(__name__)
 
 # Подпись
-def sign(path: str, query: str = "", body: str = "") -> tuple[str,str]:
+def sign(path: str, query: str = "", body: str = "") -> tuple[str, str]:
     timestamp = str(int(time.time() * 1000))
     origin = timestamp + API_KEY + path + query + body
     signature = hmac.new(API_SECRET.encode(), origin.encode(), hashlib.sha256).hexdigest()
     return timestamp, signature
 
 # Получить параметры symbol: minOrderQty, qtyStep
-# Исправлено: вызываем только ?category=linear, затем фильтруем по символу
 def get_symbol_info(symbol: str) -> tuple[float, float]:
     path = "/v5/market/symbols"
     query = "?category=linear"
     ts, sig = sign(path, query)
     headers = {
-        'X-BAPI-API-KEY': API_KEY,
-        'X-BAPI-TIMESTAMP': ts,
-        'X-BAPI-SIGN': sig,
-        'Content-Type': 'application/json'
+        'X-BAPI-API-KEY':    API_KEY,
+        'X-BAPI-TIMESTAMP':  ts,
+        'X-BAPI-SIGN':       sig,
+        'Content-Type':      'application/json'
     }
     res = requests.get(BASE_URL + path + query, headers=headers)
     if res.status_code != 200:
         logger.error(f"Symbols request failed {res.status_code}: {res.text}")
         raise RuntimeError("Could not fetch symbol info")
     data = res.json()
-    # Ищем нужный символ в списке
     for info in data.get('result', {}).get('list', []):
-        if info.get('name') == symbol or info.get('symbol') == symbol:
-            return float(info['minOrderQty']), float(info['qtyStep'])
+        if info.get('symbol') == symbol:
+            lot_filter = info.get('lotSizeFilter', {})
+            min_qty = float(lot_filter.get('minOrderQty', 0))
+            step    = float(lot_filter.get('qtyStep', 0))
+            return min_qty, step
     logger.error(f"Symbol {symbol} not found in symbols list")
     raise RuntimeError(f"Symbol {symbol} info missing")
 
@@ -58,9 +59,9 @@ def get_price(symbol: str) -> float:
     query = f"?symbol={symbol}&category=linear"
     ts, sig = sign(path, query)
     headers = {
-        'X-BAPI-API-KEY': API_KEY,
+        'X-BAPI-API-KEY':   API_KEY,
         'X-BAPI-TIMESTAMP': ts,
-        'X-BAPI-SIGN': sig,
+        'X-BAPI-SIGN':      sig,
     }
     res = requests.get(BASE_URL + path + query, headers=headers)
     price = float(res.json()['result']['list'][0]['lastPrice'])
@@ -76,17 +77,18 @@ def send_telegram(text: str):
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
     price = get_price(symbol)
     min_qty, step = get_symbol_info(symbol)
+    # расчет минимального количества с учетом $5 базы
     raw_min = max(5/price, min_qty)
-    min_qty_calc = math.ceil(raw_min/step) * step
-    qty_adj = math.ceil(qty/step) * step
-    final_qty = max(qty_adj, min_qty_calc)
+    min_calc = math.ceil(raw_min/step) * step
+    qty_adj  = math.ceil(qty/step) * step
+    final_qty = max(qty_adj, min_calc)
 
     body = {
         "category": "linear",
-        "symbol": symbol,
-        "side": side,
+        "symbol":   symbol,
+        "side":     side,
         "orderType": "Market",
-        "qty": str(final_qty),
+        "qty":      str(final_qty),
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only
     }
@@ -94,10 +96,10 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
     bstr = json.dumps(body)
     ts, sig = sign(path, "", bstr)
     headers = {
-        'X-BAPI-API-KEY': API_KEY,
+        'X-BAPI-API-KEY':   API_KEY,
         'X-BAPI-TIMESTAMP': ts,
-        'X-BAPI-SIGN': sig,
-        'Content-Type': 'application/json'
+        'X-BAPI-SIGN':      sig,
+        'Content-Type':     'application/json'
     }
     resp = requests.post(BASE_URL + path, headers=headers, data=bstr)
     try:
@@ -111,7 +113,7 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
 # Вебхук от TradingView
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
+    data   = request.get_json()
     logger.debug(f"Webhook payload {data}")
     symbol = data['symbol']
     side   = data['side'].capitalize()
@@ -124,7 +126,7 @@ def webhook():
     except Exception as e:
         logger.exception("Error handling webhook")
         send_telegram(f"Error: {e}")
-        return jsonify({'status':'error', 'message': str(e)}), 500
+        return jsonify({'status':'error','message':str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
