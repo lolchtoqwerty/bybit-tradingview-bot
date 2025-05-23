@@ -109,12 +109,23 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
     else:
         qty_contracts = qty
 
-    # Place order
-    body = {"category": "linear", "symbol": symbol,
-            "side": side, "orderType": "Market",
-            "qty": str(qty_contracts), "timeInForce": "ImmediateOrCancel",
-            "reduceOnly": reduce_only}
-    resp = http_post("v5/order/create", body)
+        # Place order
+    body = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Market",
+        "qty": str(qty_contracts),
+        "timeInForce": "ImmediateOrCancel"
+    }
+    if reduce_only:
+        body["reduceOnly"] = True
+        # specify positionIdx for cross-account position closure
+        body["positionIdx"] = 0
+    else:
+        body["reduceOnly"] = False
+
+    resp = http_post("v5/order/create", body)("v5/order/create", body)
     result = resp.json()
 
     # Post-execution remaining position
