@@ -17,8 +17,8 @@ BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
-LONG_LEVERAGE = 3  # leverage for longs
-SHORT_LEVERAGE = 1  # leverage for shorts
+LONG_LEVERAGE = 3   # leverage multiplier for Buy
+SHORT_LEVERAGE = 1  # leverage multiplier for Sell
 
 # ——— Logging Setup ———
 logging.basicConfig(
@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 def sign_request(path: str, payload_str: str = "", query: str = ""):
     ts = str(int(time.time() * 1000))
     to_sign = ts + BYBIT_API_KEY + (payload_str or query)
-    signature = hmac.new(BYBIT_API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(
+        BYBIT_API_SECRET.encode(), to_sign.encode(), hashlib.sha256
+    ).hexdigest()
     return ts, signature
 
 # ——— HTTP Helpers ———
@@ -39,7 +41,11 @@ def http_get(path: str, params: dict = None):
     url = f"{BASE_URL}/{path}"
     query = '&'.join(f"{k}={v}" for k, v in (params or {}).items())
     ts, sign = sign_request(path, query=query)
-    headers = {"X-BAPI-API-KEY": BYBIT_API_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sign}
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-SIGN": sign
+    }
     resp = requests.get(url, headers=headers, params=params)
     return resp
 
@@ -47,8 +53,12 @@ def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
     payload_str = json.dumps(body, separators=(',', ':'), sort_keys=True)
     ts, sign = sign_request(path, payload_str=payload_str)
-    headers = {"Content-Type": "application/json", "X-BAPI-API-KEY": BYBIT_API_KEY,
-               "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sign}
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-SIGN": sign
+    }
     resp = requests.post(url, headers=headers, data=payload_str)
     return resp
 
@@ -62,9 +72,13 @@ def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED") -> flo
 
 
 def get_symbol_info(symbol: str):
-    f = http_get("v5/market/instruments-info", {"category": "linear", "symbol": symbol})
-    f = f.json().get("result", {}).get("list", [])[0].get("lotSizeFilter", {})
-    return float(f.get("minOrderQty", 0)), float(f.get("qtyStep", 1)), float(f.get("minNotionalValue", 0))
+    data = http_get("v5/market/instruments-info", {"category": "linear", "symbol": symbol}).json()
+    filt = data.get("result", {}).get("list", [])[0].get("lotSizeFilter", {})
+    return (
+        float(filt.get("minOrderQty", 0)),
+        float(filt.get("qtyStep", 1)),
+        float(filt.get("minNotionalValue", 0))
+    )
 
 
 def get_ticker_price(symbol: str) -> float:
@@ -81,20 +95,25 @@ def get_position_qty(symbol: str, side: str) -> float:
 
 
 def set_leverage(symbol: str):
-    return http_post("v5/position/set-leverage", {
-        "category": "linear", "symbol": symbol,
-        "buyLeverage": LONG_LEVERAGE, "sellLeverage": SHORT_LEVERAGE
-    }).json()
+    return http_post(
+        "v5/position/set-leverage",
+        {
+            "category": "linear",
+            "symbol": symbol,
+            "buyLeverage": LONG_LEVERAGE,
+            "sellLeverage": SHORT_LEVERAGE
+        }
+    ).json()
 
 
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False) -> dict:
     """
-    Executes a market order. Returns dict with:
-      - result: raw API response
-      - closedQty or execQty: number of contracts traded
-      - remaining: remaining position size after execution
+    Executes a market order. Returns dict:
+      - result: API response
+      - tradedQty: contracts traded
+      - remaining: remaining position size (if reduce_only)
     """
-    # Determine trade quantity
+    # Determine contract quantity
     if side == 'Buy' and not reduce_only:
         set_leverage(symbol)
         balance = get_wallet_balance()
@@ -103,60 +122,62 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         price = get_ticker_price(symbol)
         qty_contracts = max(min_c, step * floor(notional / (price * step)))
     elif reduce_only:
-        # closing: determine open contracts on opposite side
-        close_side = 'Buy' if side == 'Sell' else 'Sell'
-        qty_contracts = get_position_qty(symbol, close_side)
+        opposite = 'Buy' if side == 'Sell' else 'Sell'
+        qty_contracts = get_position_qty(symbol, opposite)
     else:
         qty_contracts = qty
 
-        # Place order
+    # Build and send order
     body = {
         "category": "linear",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
         "qty": str(qty_contracts),
-        "timeInForce": "ImmediateOrCancel"
+        "timeInForce": "ImmediateOrCancel",
+        "reduceOnly": reduce_only
     }
     if reduce_only:
-        body["reduceOnly"] = True
-        # specify positionIdx for cross-account position closure
         body["positionIdx"] = 0
-    else:
-        body["reduceOnly"] = False
 
-    resp = http_post("v5/order/create", body)("v5/order/create", body)
+    resp = http_post("v5/order/create", body)
     result = resp.json()
 
-    # Post-execution remaining position
-    remaining = get_position_qty(symbol, 'Buy') if reduce_only and side == 'Sell' else (
-        get_position_qty(symbol, 'Sell') if reduce_only and side == 'Buy' else None
-    )
+    # Fetch remaining position if closed
+    remaining = None
+    if reduce_only:
+        opposite = 'Buy' if side == 'Sell' else 'Sell'
+        remaining = get_position_qty(symbol, opposite)
+
     return {"result": result, "tradedQty": qty_contracts, "remaining": remaining}
 
 
 def send_telegram(text: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        )
 
 # ——— Flask App ———
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    p = request.get_json(force=True)
-    symbol = p.get('symbol')
-    action = p.get('side', '')
-    qty_param = float(p.get('qty', 0))
+    payload = request.get_json(force=True)
+    symbol = payload.get('symbol')
+    action = payload.get('side', '')
+    qty_param = float(payload.get('qty', 0))
     reduce_flag = action.lower().startswith('exit')
     side = 'Buy' if 'buy' in action.lower() else 'Sell'
 
     order = place_order(symbol, side, qty_param, reduce_only=reduce_flag)
-    if 'remaining' in order and order['remaining'] is not None:
-        msg = f"{side} {symbol} traded={order['tradedQty']} remaining={order['remaining']} → {order['result']}"
-    else:
-        msg = f"{side} {symbol} traded={order['tradedQty']} → {order['result']}"
+
+    # Compose message
+    msg = f"{side} {symbol} traded={order['tradedQty']}"
+    if order.get('remaining') is not None:
+        msg += f" remaining={order['remaining']}"
+    msg += f" → {order['result']}"
     send_telegram(msg)
     return {"status": "ok"}
 
