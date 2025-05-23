@@ -130,7 +130,11 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         "reduceOnly": reduce_only
     }
 
-    # Send order
+        # Send order
+    if reduce_only:
+        # target long side in hedge mode: positionIdx 0
+        body["positionIdx"] = 0
+    resp = http_post("v5/order/create", body)
     resp = http_post("v5/order/create", body)
     result = resp.json()
     executed = qty_contracts
