@@ -79,20 +79,25 @@ def http_post(path: str, body: dict):
     return resp
 
 # ——— Bybit Utilities ———
-def get_wallet_balance(coin: str = "USDT"):
+def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED"):
     """
-    Returns available wallet balance for given coin.
+    Returns available wallet balance for given coin and account type.
     """
-    logger.info(f"Fetching wallet balance for {coin}")
+    logger.info(f"Fetching wallet balance for {coin}, accountType={account_type}")
     path = "v5/account/wallet-balance"
-    params = {"coin": coin}
+    params = {"coin": coin, "accountType": account_type}
     resp = http_get(path, params)
     data = resp.json()
-    # result.list[0].equity or .availableBalance depending on API
-    bal_info = data["result"]["list"][0]
-    # use availableBalance for margin
+    if data.get("retCode") != 0:
+        logger.error(f"Wallet balance API error: {data.get('retMsg')}")
+        return 0.0
+    items = data.get("result", {}).get("list", [])
+    if not items:
+        logger.error("Wallet balance API returned empty list")
+        return 0.0
+    bal_info = items[0]
     balance = float(bal_info.get("availableBalance", bal_info.get("equity", 0)))
-    logger.info(f"Wallet {coin} balance: {balance}")
+    logger.info(f"Wallet {coin} availableBalance: {balance}")
     return balance
 
 
@@ -105,7 +110,7 @@ def get_symbol_info(symbol: str):
     params = {"category": "linear", "symbol": symbol}
     resp = http_get(path, params)
     data = resp.json()
-    info = data["result"]["list"][0]
+    info = data.get("result", {}).get("list", [])[0]
     filters = info.get("lotSizeFilter", {})
     min_contract = float(filters.get("minOrderQty", 0))
     step = float(filters.get("qtyStep", 1))
@@ -122,7 +127,7 @@ def get_ticker_price(symbol: str):
     params = {"category": "linear", "symbol": symbol}
     resp = http_get(path, params)
     data = resp.json()
-    price = float(data["result"]["list"][0]["lastPrice"])
+    price = float(data.get("result", {}).get("list", [])[0].get("lastPrice", 0))
     return price
 
 
@@ -149,37 +154,32 @@ def set_leverage(symbol: str, long_leverage: int = LONG_LEVERAGE, short_leverage
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False):
     """
     Places a market order.
-    For BUY: qty ignored, uses 100% of USDT balance * leverage.
+    For BUY: uses 100% of USDT balance * leverage.
     For SELL: qty interpreted as contract quantity.
     """
     logger.info(f"Placing order: symbol={symbol}, side={side}, qty_param={qty}, reduce_only={reduce_only}")
-    if not reduce_only and side == "Buy":
+    if side == "Buy" and not reduce_only:
         set_leverage(symbol, LONG_LEVERAGE, SHORT_LEVERAGE)
         balance = get_wallet_balance("USDT")
         notional = balance * LONG_LEVERAGE
-        logger.debug(f"Notional USDT for BUY: balance {balance} * leverage {LONG_LEVERAGE} = {notional}")
+        logger.debug(f"Notional USDT for BUY: {balance} * {LONG_LEVERAGE} = {notional}")
     else:
-        # SELL or reduce, use provided qty as contracts
         notional = None
         contracts = qty
 
-    # Fetch symbol filters
     min_contract, step, min_notional = get_symbol_info(symbol)
     price = get_ticker_price(symbol)
 
     if side == "Buy":
-        # Ensure meets min notional
         if notional < min_notional:
             msg = f"Calculated notional {notional} USDT below minNotional {min_notional}"
             logger.error(msg)
             return {"retCode": -1, "retMsg": msg}
-        # Calculate contracts = floor(notional / price / step) * step
         contracts = step * floor(notional / (price * step))
         if contracts < min_contract:
             contracts = min_contract
-        logger.debug(f"Calculated BUY contracts {contracts} for notional {notional} at price {price}")
+        logger.debug(f"Calculated BUY contracts {contracts} for notional {notional} at {price}")
 
-    # Build order
     body = {
         "category": "linear",
         "symbol": symbol,
