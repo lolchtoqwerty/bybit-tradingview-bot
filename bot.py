@@ -126,7 +126,7 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         "side": side,
         "orderType": "Market",
         "qty": str(qty_contracts),
-        "timeInForce": "IOC",
+        "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only
     }
 
