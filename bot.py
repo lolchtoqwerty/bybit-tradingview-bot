@@ -76,7 +76,8 @@ def bybit_post(path: str, body: dict) -> dict:
     payload = json.dumps(body, separators=(',',':'))
     # use full path for signing
     request_path = path
-    signature = sign_v5(timestamp, recv_window, request_path, payload)
+        # Для POST подписываем только тело (body), без пути
+    signature = sign_v5(timestamp, recv_window, "", payload)
     headers = {
         "Content-Type": "application/json",
         "X-BAPI-API-KEY": API_KEY,
