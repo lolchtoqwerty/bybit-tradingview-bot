@@ -66,7 +66,8 @@ def http_get(path: str, params: dict = None):
 
 def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
-    payload_str = json.dumps(body, separators=(",","":"), sort_keys=True)
+    # separators: (item separator, key:value separator)
+    payload_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
     ts, sign = sign_request(path, payload_str=payload_str)
     headers = {
         "Content-Type": "application/json",
