@@ -35,8 +35,8 @@ def send_telegram(message: str):
     logger.info(f"[Telegram] Response {resp.status_code}: {resp.text}")
 
 # Auth signature for v5 API
-def sign_v5(timestamp: str, recv_window: str, req_path: str, body: str = "") -> str:
-    msg = timestamp + (API_KEY or "") + recv_window + req_path + body
+def sign_v5(timestamp: str, recv_window: str, request_path: str, body: str = "") -> str:
+    msg = timestamp + (API_KEY or "") + recv_window + request_path + body
     sig = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
     logger.debug(f"[Auth] String to sign: {msg}")
     logger.debug(f"[Auth] Signature: {sig}")
@@ -47,15 +47,16 @@ def bybit_get(path: str, params: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
     query = '&'.join(f"{k}={v}" for k, v in params.items())
-    signature = sign_v5(timestamp, recv_window, query)
+    request_path = path + '?' + query
+    signature = sign_v5(timestamp, recv_window, request_path)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": recv_window,
         "X-BAPI-SIGN": signature,
     }
-    url = BASE_URL + path + f"?{query}"
-    logger.debug(f"[GET] {url} signing path: {query}")
+    url = BASE_URL + request_path
+    logger.debug(f"[GET] {url} signing path: {request_path}")
     resp = requests.get(url, headers=headers)
     logger.debug(f"[GET] status {resp.status_code}: {resp.text}")
     try:
@@ -67,9 +68,10 @@ def bybit_get(path: str, params: dict) -> dict:
 def bybit_post(path: str, body: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    req_path = path.lstrip('/')
-    payload = json.dumps(body)
-    signature = sign_v5(timestamp, recv_window, req_path, payload)
+    # Use compact JSON without spaces for signing
+    payload = json.dumps(body, separators=(',',':'))
+    request_path = path
+    signature = sign_v5(timestamp, recv_window, request_path, payload)
     headers = {
         "Content-Type": "application/json",
         "X-BAPI-API-KEY": API_KEY,
@@ -78,7 +80,7 @@ def bybit_post(path: str, body: dict) -> dict:
         "X-BAPI-SIGN": signature,
     }
     url = BASE_URL + path
-    logger.debug(f"[POST] {url} signing path: {req_path} body {payload}")
+    logger.debug(f"[POST] {url} signing path: {request_path} body {payload}")
     resp = requests.post(url, headers=headers, data=payload)
     logger.debug(f"[POST] status {resp.status_code}: {resp.text}")
     try:
@@ -129,13 +131,13 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> 
             logger.warning(f"[Order] adjust qty {qty}->{min_qty}")
             qty = min_qty
     body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": side.capitalize(),
-        "orderType": "Market",
-        "qty": str(qty),
-        "timeInForce": "ImmediateOrCancel",
-        "reduceOnly": reduce_only,
+        "category":"linear",
+        "symbol":symbol,
+        "side":side.capitalize(),
+        "orderType":"Market",
+        "qty":str(qty),
+        "timeInForce":"ImmediateOrCancel",
+        "reduceOnly":reduce_only
     }
     res = bybit_post("/v5/order/create", body)
     logger.info(f"[Order] {side} {symbol} qty {qty} => {res}")
