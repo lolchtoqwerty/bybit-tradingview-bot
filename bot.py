@@ -98,28 +98,30 @@ def set_leverage(symbol: str):
 
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False) -> dict:
     """
-    Executes a market order. Returns dict with:
-      - result: API response
-      - tradedQty: contracts traded
-      - remaining: remaining contracts after reduce
+    Executes a market order on linear perpetual futures.
+    - For Buy (reduce_only=False): opens position with 100% balance × leverage.
+    - For Close (reduce_only=True): closes entire opposite position using its size.
+
+    Returns:
+      - result: raw API response
+      - executed: number of contracts sent
+      - remaining: remaining size after close (None for opens)
     """
-    # Determine order quantity
+    # Determine contract quantity
     if side == 'Buy' and not reduce_only:
-        # ensure leverage
         set_leverage(symbol)
         balance = get_wallet_balance()
-        notional = balance * LONG_LEVERAGE
         min_c, step, _ = get_symbol_info(symbol)
         price = get_ticker_price(symbol)
-        qty_contracts = max(min_c, step * floor(notional / (price * step)))
+        qty_contracts = max(min_c, step * floor((balance * LONG_LEVERAGE) / (price * step)))
     elif reduce_only:
-        # closing: use current open position size
+        # closing: fetch current open contracts on opposite side
         opposite = 'Buy' if side == 'Sell' else 'Sell'
         qty_contracts = get_position_qty(symbol, opposite)
     else:
         qty_contracts = qty
 
-    # Build order payload per v5 API spec
+    # Build order payload
     body = {
         "category": "linear",
         "symbol": symbol,
@@ -130,53 +132,18 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         "reduceOnly": reduce_only
     }
 
-        # Send order
-    if reduce_only:
-        # target long side in hedge mode: positionIdx 0
-        body["positionIdx"] = 0
-    resp = http_post("v5/order/create", body)
+    # Send order once
     resp = http_post("v5/order/create", body)
     result = resp.json()
     executed = qty_contracts
 
-    # Check remaining position after close
+    # Check remaining if closed
     remaining = None
     if reduce_only:
-        data = http_get("v5/position/list", {"category": "linear", "symbol": symbol}).json()
-        for pos in data.get("result", {}).get("list", []):
-            if pos.get("side", "").lower() == side.lower():
-                remaining = float(pos.get("size", 0))
-                break
+        opposite = 'Buy' if side == 'Sell' else 'Sell'
+        remaining = get_position_qty(symbol, opposite)
 
-    return {"result": result, "executed": executed, "remaining": remaining}
-
-
-def send_telegram(text: str):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text}
-        )
-
-# ——— Flask App ———
-app = Flask(__name__)
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    payload = request.get_json(force=True)
-    symbol = payload.get('symbol')
-    action = payload.get('side', '')
-    qty_param = float(payload.get('qty', 0))
-    reduce_flag = action.lower().startswith('exit')
-    side = 'Buy' if 'buy' in action.lower() else 'Sell'
-
-    order = place_order(symbol, side, qty_param, reduce_only=reduce_flag)
-    msg = f"{side} {symbol} executed={order['executed']}"
-    if order.get('remaining') is not None:
-        msg += f" remaining={order['remaining']}"
-    msg += f" → {order['result']}"
-    send_telegram(msg)
-    return {"status": "ok"}
+    return {"result": result, "executed": executed, "remaining": remaining}"status": "ok"}
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
