@@ -42,7 +42,9 @@ def http_get(path: str, params: dict = None):
     query = '&'.join(f"{k}={v}" for k, v in (params or {}).items())
     ts, sign = sign_request(path, query=query)
     headers = {"X-BAPI-API-KEY": BYBIT_API_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sign}
-    return requests.get(url, headers=headers, params=params)
+    resp = requests.get(url, headers=headers, params=params)
+    logger.debug(f"GET {path}?{query} → {resp.status_code} {resp.text}")
+    return resp
 
 
 def http_post(path: str, body: dict):
@@ -55,7 +57,9 @@ def http_post(path: str, body: dict):
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-SIGN": sign
     }
-    return requests.post(url, headers=headers, data=payload_str)
+    resp = requests.post(url, headers=headers, data=payload_str)
+    logger.debug(f"POST {path} {payload_str} → {resp.status_code} {resp.text}")
+    return resp
 
 # ——— Bybit Utilities ———
 def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED") -> float:
@@ -77,14 +81,6 @@ def get_ticker_price(symbol: str) -> float:
     return float(data.get("result", {}).get("list", [])[0].get("lastPrice", 0))
 
 
-def get_position_qty(symbol: str, side: str) -> float:
-    data = http_get("v5/position/list", {"category": "linear", "symbol": symbol}).json()
-    for pos in data.get("result", {}).get("list", []):
-        if pos.get("side", "").lower() == side.lower():
-            return float(pos.get("size", 0))
-    return 0.0
-
-
 def set_leverage(symbol: str):
     return http_post(
         "v5/position/set-leverage",
@@ -94,12 +90,12 @@ def set_leverage(symbol: str):
 
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False) -> dict:
     """
-    Executes a market order. Returns dict with:
-      - result: API response
-      - tradedQty: contracts traded
-      - remaining: remaining contracts after reduce
+    Executes a market order:
+      - For Buy: uses 100% balance × leverage
+      - For close: set qty=0, reduceOnly & closeOnTrigger both true to close full position
+    Returns dict with API result, executed qty, and remaining pos.
     """
-    # Determine trade quantity
+    # Determine order quantity
     if side == 'Buy' and not reduce_only:
         set_leverage(symbol)
         balance = get_wallet_balance()
@@ -108,13 +104,11 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         price = get_ticker_price(symbol)
         qty_contracts = max(min_c, step * floor(notional / (price * step)))
     elif reduce_only:
-        # closing entire opposite position
-        opposite = 'Buy' if side == 'Sell' else 'Sell'
-        qty_contracts = get_position_qty(symbol, opposite)
+        qty_contracts = 0
     else:
         qty_contracts = qty
 
-    # Build and send order
+    # Build order payload
     body = {
         "category": "linear",
         "symbol": symbol,
@@ -124,16 +118,24 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only
     }
+    if reduce_only:
+        body["closeOnTrigger"] = True
+
+    # Send order
     resp = http_post("v5/order/create", body)
     result = resp.json()
+    executed = qty_contracts
 
-    # Fetch remaining if reduced
+    # Check remaining if reduced
     remaining = None
     if reduce_only:
-        opposite = 'Buy' if side == 'Sell' else 'Sell'
-        remaining = get_position_qty(symbol, opposite)
+        data = http_get("v5/position/list", {"category": "linear", "symbol": symbol}).json()
+        for pos in data.get("result", {}).get("list", []):
+            if pos.get("side", "").lower() == side.lower():
+                remaining = float(pos.get("size", 0))
+                break
 
-    return {"result": result, "tradedQty": qty_contracts, "remaining": remaining}
+    return {"result": result, "executed": executed, "remaining": remaining}
 
 
 def send_telegram(text: str):
@@ -156,8 +158,7 @@ def webhook():
     side = 'Buy' if 'buy' in action.lower() else 'Sell'
 
     order = place_order(symbol, side, qty_param, reduce_only=reduce_flag)
-
-    msg = f"{side} {symbol} traded={order['tradedQty']}"
+    msg = f"{side} {symbol} executed={order['executed']}"
     if order.get('remaining') is not None:
         msg += f" remaining={order['remaining']}"
     msg += f" → {order['result']}"
