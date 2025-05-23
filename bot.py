@@ -1,4 +1,4 @@
-# bot.py — Bybit TradingView Webhook Bot
+# bot.py — Bybit TradingView Webhook Bot (Mainnet)
 import os
 import time
 import json
@@ -12,14 +12,15 @@ from math import floor
 # ——— Configuration ———
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
-BASE_URL         = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
+# По умолчанию подключаемся к основному API Bybit (Mainnet)
+BASE_URL         = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com")
 RECV_WINDOW      = "5000"
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
-LONG_LEVERAGE  = 3
-SHORT_LEVERAGE = 1
+LONG_LEVERAGE    = 3  # leverage для открытия Buy
+SHORT_LEVERAGE   = 1  # leverage для открытия Sell и для закрытия позиций
 
 # ——— Logging Setup ———
 logging.basicConfig(
@@ -53,6 +54,7 @@ def http_get(path: str, params: dict = None):
     logger.debug(f"GET {path}?{query} → {resp.status_code} {resp.text}")
     return resp
 
+
 def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
     payload_str = json.dumps(body, separators=(',', ':'), sort_keys=True)
@@ -74,29 +76,39 @@ def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED") -> flo
     if data.get("retCode") != 0:
         return 0.0
     items = data["result"]["list"]
-    return float(items[0]["totalAvailableBalance"])
+    return float(items[0].get("totalAvailableBalance", 0))
+
 
 def get_symbol_info(symbol: str):
     data = http_get("v5/market/instruments-info", {"category": "linear", "symbol": symbol}).json()
     filt = data["result"]["list"][0]["lotSizeFilter"]
-    return float(filt["minOrderQty"]), float(filt["qtyStep"]), float(filt["minNotionalValue"])
+    return float(filt.get("minOrderQty", 0)), float(filt.get("qtyStep", 1)), float(filt.get("minNotionalValue", 0))
+
 
 def get_ticker_price(symbol: str) -> float:
     data = http_get("v5/market/tickers", {"category": "linear", "symbol": symbol}).json()
-    return float(data["result"]["list"][0]["lastPrice"])
+    return float(data["result"]["list"][0].get("lastPrice", 0))
+
 
 def get_position_qty(symbol: str, side: str) -> float:
     data = http_get("v5/position/list", {"category": "linear", "symbol": symbol}).json()
     for pos in data["result"]["list"]:
-        if pos["side"].lower() == side.lower():
-            return float(pos["size"])
+        if pos.get("side", "").lower() == side.lower():
+            return float(pos.get("size", 0))
     return 0.0
 
+
 def set_leverage(symbol: str):
-    return http_post(
-        "v5/position/set-leverage",
-        {"category": "linear", "symbol": symbol, "buyLeverage": LONG_LEVERAGE, "sellLeverage": SHORT_LEVERAGE}
-    ).json()
+    # Используем snake_case параметров и указываем position_idx
+    body = {
+        "category":     "linear",
+        "symbol":       symbol,
+        "buy_leverage": LONG_LEVERAGE,
+        "sell_leverage":SHORT_LEVERAGE,
+        "position_idx": 0
+    }
+    return http_post("v5/position/set-leverage", body).json()
+
 
 def get_executions(symbol: str, order_id: str):
     data = http_get(
@@ -105,51 +117,62 @@ def get_executions(symbol: str, order_id: str):
     ).json()
     return data.get("result", {}).get("list", [])
 
+# ——— Core Order Functions ———
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False) -> dict:
-    # вычисляем контрактный объём
+    # Открытие Buy
     if side == 'Buy' and not reduce_only:
         set_leverage(symbol)
         balance = get_wallet_balance()
         min_c, step, _ = get_symbol_info(symbol)
         price = get_ticker_price(symbol)
         qty_contracts = max(min_c, step * floor((balance * LONG_LEVERAGE) / (price * step)))
-    elif reduce_only:
-        opposite = 'Buy' if side == 'Sell' else 'Sell'
-        qty_contracts = get_position_qty(symbol, opposite)
-    else:
-        qty_contracts = qty
+        res = http_post("v5/order/create", {
+            "category":"linear","symbol":symbol,
+            "side":"Buy","orderType":"Market",
+            "qty":str(qty_contracts),"timeInForce":"ImmediateOrCancel"
+        })
+        return {"result": res.json(), "executed": qty_contracts, "remaining": None}
 
-    body = {
-        "category":   "linear",
-        "symbol":     symbol,
-        "side":       side,
-        "orderType":  "Market",
-        "qty":        str(qty_contracts),
-        "timeInForce":"ImmediateOrCancel",
-        "reduce_only": reduce_only
-    }
+    # Открытие Sell (шорт)
+    if side == 'Sell' and not reduce_only:
+        set_leverage(symbol)
+        balance = get_wallet_balance()
+        min_c, step, _ = get_symbol_info(symbol)
+        price = get_ticker_price(symbol)
+        qty_contracts = max(min_c, step * floor((balance * SHORT_LEVERAGE) / (price * step)))
+        res = http_post("v5/order/create", {
+            "category":"linear","symbol":symbol,
+            "side":"Sell","orderType":"Market",
+            "qty":str(qty_contracts),"timeInForce":"ImmediateOrCancel"
+        })
+        return {"result": res.json(), "executed": qty_contracts, "remaining": None}
 
-    # создаём ордер
-    resp   = http_post("v5/order/create", body)
-    result = resp.json()
-    order_id = result.get("result", {}).get("orderId", "")
-
-    # если это закрытие позиции — проверяем реальные исполнившиеся объёмы
-    if reduce_only and order_id:
-        exec_list = get_executions(symbol, order_id)
+    # Закрытие позиции по reduce_only (Sell для Buy или Buy для Sell)
+    if reduce_only:
+        opposite = 'Sell' if side=='Buy' else 'Buy'
+        qty_close = get_position_qty(symbol, 'Buy' if side=='Sell' else 'Sell')
+        res = http_post("v5/order/create", {
+            "category":"linear","symbol":symbol,
+            "side":opposite,"orderType":"Market",
+            "qty":str(qty_close),"timeInForce":"ImmediateOrCancel",
+            "reduce_only":True
+        })
+        order_id = res.json().get("result", {}).get("orderId", "")
+        exec_list = get_executions(symbol, order_id) if order_id else []
         actual = sum(float(evt.get("execQty", 0)) for evt in exec_list)
-        remaining = get_position_qty(symbol, 'Buy' if side=='Sell' else 'Sell')
-        executed = actual
-    else:
-        executed  = qty_contracts
-        remaining = None
+        remaining = get_position_qty(symbol, side)
+        return {"result": res.json(), "executed": actual, "remaining": remaining}
 
-    return {
-        "result":    result,
-        "executed":  executed,
-        "remaining": remaining
-    }
+    # В остальных случаях используем переданный qty
+    res = http_post("v5/order/create", {
+        "category":"linear","symbol":symbol,
+        "side":side,"orderType":"Market",
+        "qty":str(qty),"timeInForce":"ImmediateOrCancel",
+        "reduce_only":reduce_only
+    })
+    return {"result": res.json(), "executed": qty, "remaining": None}
 
+# ——— Telegram ———
 def send_telegram(text: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         requests.post(
@@ -162,16 +185,16 @@ app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    payload    = request.get_json(force=True)
-    symbol     = payload.get('symbol')
-    action     = payload.get('side', '')
-    qty_param  = float(payload.get('qty', 0))
-    reduce_flag= action.lower().startswith('exit')
-    side       = 'Buy' if 'buy' in action.lower() else 'Sell'
+    payload     = request.get_json(force=True)
+    symbol      = payload.get('symbol')
+    action      = payload.get('side', '')
+    qty_param   = float(payload.get('qty', 0))
+    reduce_flag = action.lower().startswith('exit')
+    side        = 'Buy' if 'buy' in action.lower() else 'Sell'
 
     order = place_order(symbol, side, qty_param, reduce_only=reduce_flag)
     msg   = f"{side} {symbol} executed={order['executed']}"
-    if order['remaining'] is not None:
+    if order.get('remaining') is not None:
         msg += f" remaining={order['remaining']}"
     msg  += f" → {order['result']}"
     send_telegram(msg)
