@@ -27,16 +27,17 @@ logger = logging.getLogger(__name__)
 def sign_request(path: str, payload_str: str = "", query: str = ""):
     """
     Create timestamp and HMAC SHA256 signature for Bybit API v5.
-    Path should NOT include leading slash, e.g. "v5/order/create".
+    Body-only signature due to testnet path signing discrepancy.
     payload_str: exact JSON string for POST; query: raw query string without '?' for GET.
     """
     ts = str(int(time.time() * 1000))
-    request_path = f"/{path}"
+    # For testnet v5 signature expects ts+apiKey+payload or ts+apiKey+query without request path
     if payload_str:
-        to_sign = ts + BYBIT_API_KEY + request_path + payload_str
+        to_sign = ts + BYBIT_API_KEY + payload_str
+    elif query:
+        to_sign = ts + BYBIT_API_KEY + query
     else:
-        query_str = f"?{query}" if query else ""
-        to_sign = ts + BYBIT_API_KEY + request_path + query_str
+        to_sign = ts + BYBIT_API_KEY
     logger.debug(f"Signature string: {to_sign}")
     signature = hmac.new(
         BYBIT_API_SECRET.encode(),
