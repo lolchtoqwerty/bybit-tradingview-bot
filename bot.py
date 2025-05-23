@@ -99,7 +99,11 @@ def set_leverage(symbol: str, long_leverage: int = 3, short_leverage: int = 1):
         "sellLeverage": short_leverage
     }
     resp = http_post(path, body)
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.error(f"Set leverage no JSON response: {resp.status_code} {resp.text}")
+        return {"retCode": -1, "retMsg": "No JSON from leverage API"}
     if data.get("retCode") != 0:
         logger.warning(f"Set leverage failed: {data.get('retMsg')}")
     else:
@@ -128,7 +132,11 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
         "reduceOnly": reduce_only
     }
     resp = http_post("v5/order/create", body)
-    result = resp.json()
+    try:
+        result = resp.json()
+    except ValueError:
+        logger.error(f"Order response not JSON: {resp.status_code} {resp.text}")
+        return {"retCode": -1, "retMsg": "No JSON from order API"}
     logger.info(f"Order {side} {symbol} qty={adjusted_qty} -> {result}")
     return result
 
