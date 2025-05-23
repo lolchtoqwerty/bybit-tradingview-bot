@@ -109,8 +109,9 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False):
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly":  reduce_only
     }
+    # Используем компактный сериализатор без пробелов и в порядке ключей для корректной подписи
+    payload_str = json.dumps(body, separators=(",","":"), sort_keys=True)
     path = "/v5/order/create"
-    payload_str = json.dumps(body)
     ts, sig = sign(path, "", payload_str)
     headers = {
         'X-BAPI-API-KEY':   API_KEY,
