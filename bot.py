@@ -94,8 +94,17 @@ def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED"):
         logger.error("Wallet balance API returned empty list")
         return 0.0
     bal_info = items[0]
-    balance = float(bal_info.get("availableBalance", bal_info.get("equity", 0)))
-    logger.info(f"Wallet {coin} availableBalance: {balance}")
+    # Unified account returns totalAvailableBalance; fallback to coin list
+    if "totalAvailableBalance" in bal_info:
+        balance = float(bal_info.get("totalAvailableBalance", 0))
+    else:
+        coin_list = bal_info.get("coin", [])
+        if coin_list:
+            c = coin_list[0]
+            balance = float(c.get("availableToWithdraw", c.get("walletBalance", 0)))
+        else:
+            balance = 0.0
+    logger.info(f"Wallet {coin} balance: {balance}")
     return balance
 
 
