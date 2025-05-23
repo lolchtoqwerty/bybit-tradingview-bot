@@ -19,7 +19,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 # ——— Logging Setup ———
 logging.basicConfig(
     level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -37,12 +37,13 @@ def sign_request(path: str, payload_str: str = "", query: str = ""):
     else:
         query_str = f"?{query}" if query else ""
         to_sign = ts + BYBIT_API_KEY + request_path + query_str
-    logger.debug(f"[Signature] to_sign: {to_sign}")
+    logger.debug(f"Signature string: {to_sign}")
     signature = hmac.new(
         BYBIT_API_SECRET.encode(),
         to_sign.encode(),
         hashlib.sha256
     ).hexdigest()
+    logger.debug(f"Generated signature: {signature}")
     return ts, signature
 
 # ——— HTTP Helpers ———
@@ -57,13 +58,15 @@ def http_get(path: str, params: dict = None):
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-SIGN": sign
     }
-    logger.debug(f"[GET] {url}?{query} headers={headers}")
-    return requests.get(url, headers=headers, params=params)
+    logger.debug(f"HTTP GET {url}?{query}")
+    resp = requests.get(url, headers=headers, params=params)
+    logger.debug(f"Response [{resp.status_code}]: {resp.text}")
+    return resp
 
 
 def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
-    payload_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    payload_str = json.dumps(body, separators=(",","":"), sort_keys=True)
     ts, sign = sign_request(path, payload_str=payload_str)
     headers = {
         "Content-Type": "application/json",
@@ -71,15 +74,22 @@ def http_post(path: str, body: dict):
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-SIGN": sign
     }
-    logger.debug(f"[POST] {url} payload={payload_str} headers={headers}")
-    return requests.post(url, headers=headers, data=payload_str)
+    logger.debug(f"HTTP POST {url} payload={payload_str}")
+    resp = requests.post(url, headers=headers, data=payload_str)
+    logger.debug(f"Response [{resp.status_code}]: {resp.text}")
+    return resp
 
 # ——— Bybit Utilities ———
 def get_symbol_info(symbol: str):
+    logger.info(f"Fetching symbol info for {symbol}")
     path = "v5/market/instruments-info"
     params = {"category": "linear", "symbol": symbol}
     resp = http_get(path, params)
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.error(f"Invalid JSON from instruments-info: {resp.text}")
+        raise
     if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
         raise RuntimeError(f"Instrument info failed: {data.get('retMsg')}")
     info = data["result"]["list"][0]
@@ -91,6 +101,7 @@ def get_symbol_info(symbol: str):
 
 
 def set_leverage(symbol: str, long_leverage: int = 3, short_leverage: int = 1):
+    logger.info(f"Setting leverage for {symbol}: long={long_leverage}, short={short_leverage}")
     path = "v5/position/leverage/save"
     body = {
         "category": "linear",
@@ -102,26 +113,25 @@ def set_leverage(symbol: str, long_leverage: int = 3, short_leverage: int = 1):
     try:
         data = resp.json()
     except ValueError:
-        logger.error(f"Set leverage no JSON response: {resp.status_code} {resp.text}")
+        logger.error(f"Leverage API no JSON: {resp.text}")
         return {"retCode": -1, "retMsg": "No JSON from leverage API"}
     if data.get("retCode") != 0:
-        logger.warning(f"Set leverage failed: {data.get('retMsg')}")
-    else:
-        logger.info(f"Leverage set for {symbol}: long={long_leverage}, short={short_leverage}")
+        logger.warning(f"Leverage set failed: {data.get('retMsg')}")
     return data
 
 
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
+    logger.info(f"Placing order: symbol={symbol} side={side} qty={qty} reduce_only={reduce_only}")
     if not reduce_only:
         set_leverage(symbol)
     try:
         min_qty, step = get_symbol_info(symbol)
     except Exception as e:
-        logger.error(f"Symbol info error: {e}")
+        logger.error(f"get_symbol_info error: {e}")
         return {"retCode": -1, "retMsg": str(e)}
 
-    # adjust quantity to valid step
     adjusted = max(min_qty, step * round(qty / step))
+    logger.debug(f"Adjusted qty from {qty} to {adjusted}")
     body = {
         "category": "linear",
         "symbol": symbol,
@@ -135,9 +145,9 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
     try:
         result = resp.json()
     except ValueError:
-        logger.error(f"Order response not JSON: {resp.status_code} {resp.text}")
+        logger.error(f"Order API no JSON: {resp.text}")
         return {"retCode": -1, "retMsg": "No JSON from order API"}
-    logger.info(f"Order {side} {symbol} qty={adjusted} -> {result}")
+    logger.info(f"Order response: {result}")
     return result
 
 
@@ -147,6 +157,7 @@ def send_telegram(text: str):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    logger.debug(f"Sending Telegram: {text}")
     res = requests.post(url, json=payload)
     if not res.ok:
         logger.error(f"Telegram send failed: {res.text}")
