@@ -81,6 +81,14 @@ def get_ticker_price(symbol: str) -> float:
     return float(data.get("result", {}).get("list", [])[0].get("lastPrice", 0))
 
 
+def get_position_qty(symbol: str, side: str) -> float:
+    data = http_get("v5/position/list", {"category": "linear", "symbol": symbol}).json()
+    for pos in data.get("result", {}).get("list", []):
+        if pos.get("side", "").lower() == side.lower():
+            return float(pos.get("size", 0))
+    return 0.0
+
+
 def set_leverage(symbol: str):
     return http_post(
         "v5/position/set-leverage",
@@ -90,13 +98,14 @@ def set_leverage(symbol: str):
 
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False) -> dict:
     """
-    Executes a market order:
-      - For Buy: uses 100% balance × leverage
-      - For close: set qty=0, reduceOnly & closeOnTrigger both true to close full position
-    Returns dict with API result, executed qty, and remaining pos.
+    Executes a market order. Returns dict with:
+      - result: API response
+      - tradedQty: contracts traded
+      - remaining: remaining contracts after reduce
     """
     # Determine order quantity
     if side == 'Buy' and not reduce_only:
+        # ensure leverage
         set_leverage(symbol)
         balance = get_wallet_balance()
         notional = balance * LONG_LEVERAGE
@@ -104,29 +113,29 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         price = get_ticker_price(symbol)
         qty_contracts = max(min_c, step * floor(notional / (price * step)))
     elif reduce_only:
-        qty_contracts = 0
+        # closing: use current open position size
+        opposite = 'Buy' if side == 'Sell' else 'Sell'
+        qty_contracts = get_position_qty(symbol, opposite)
     else:
         qty_contracts = qty
 
-    # Build order payload
+    # Build order payload per v5 API spec
     body = {
         "category": "linear",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
         "qty": str(qty_contracts),
-        "timeInForce": "ImmediateOrCancel",
+        "timeInForce": "IOC",
         "reduceOnly": reduce_only
     }
-    if reduce_only:
-        body["closeOnTrigger"] = True
 
     # Send order
     resp = http_post("v5/order/create", body)
     result = resp.json()
     executed = qty_contracts
 
-    # Check remaining if reduced
+    # Check remaining position after close
     remaining = None
     if reduce_only:
         data = http_get("v5/position/list", {"category": "linear", "symbol": symbol}).json()
