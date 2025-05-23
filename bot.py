@@ -24,20 +24,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ——— Signature Helper ———
-def sign_request(path: str, body: dict = None, query: str = ""):
+def sign_request(path: str, payload_str: str = "", query: str = ""):
     """
     Create timestamp and HMAC SHA256 signature for Bybit API v5.
     Path should NOT include leading slash, e.g. "v5/order/create".
-    body: payload for POST; query: raw query string without leading '?'.
+    payload_str: the exact JSON string to be sent (for POST).
+    query: raw query string without leading '?'.
     """
     ts = str(int(time.time() * 1000))
     request_path = f"/{path}"
-    if body is not None:
-        payload_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    if payload_str:
         to_sign = ts + BYBIT_API_KEY + request_path + payload_str
     else:
         query_str = f"?{query}" if query else ""
         to_sign = ts + BYBIT_API_KEY + request_path + query_str
+    logger.debug(f"[Signature] to_sign: {to_sign}")
     signature = hmac.new(
         BYBIT_API_SECRET.encode(),
         to_sign.encode(),
@@ -64,15 +65,18 @@ def http_get(path: str, params: dict = None):
 
 def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
-    ts, sign = sign_request(path, body=body)
+    # serialize with no spaces and sorted keys for consistent signing and sending
+    payload_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    ts, sign = sign_request(path, payload_str=payload_str)
     headers = {
         "Content-Type": "application/json",
         "X-BAPI-API-KEY": BYBIT_API_KEY,
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-SIGN": sign
     }
-    logger.debug(f"[POST] {url} body={body} headers={headers}")
-    return requests.post(url, headers=headers, json=body)
+    logger.debug(f"[POST] {url} payload={payload_str} headers={headers}")
+    # send exact payload_str to match signature
+    return requests.post(url, headers=headers, data=payload_str)
 
 # ——— Bybit Utilities ———
 def get_symbol_info(symbol: str):
