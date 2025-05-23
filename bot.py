@@ -143,7 +143,7 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         opposite = 'Buy' if side == 'Sell' else 'Sell'
         remaining = get_position_qty(symbol, opposite)
 
-    return {"result": result, "executed": executed, "remaining": remaining}"status": "ok"}
+    return {"result": result, "executed": executed, "remaining": remaining}
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
