@@ -48,9 +48,10 @@ def sign_request(path: str, payload_str: str = "", query: str = ""):
 # ——— HTTP Helpers ———
 def http_get(path: str, params: dict = None):
     url = f"{BASE_URL}/{path}"
+    # Build query string in insertion order to match requests serialization
     query = ''
     if params:
-        query = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
+        query = '&'.join(f"{k}={v}" for k, v in params.items())
     ts, sign = sign_request(path, query=query)
     headers = {
         "X-BAPI-API-KEY": BYBIT_API_KEY,
@@ -80,9 +81,6 @@ def http_post(path: str, body: dict):
 
 # ——— Bybit Utilities ———
 def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED"):
-    """
-    Returns available wallet balance for given coin and account type.
-    """
     logger.info(f"Fetching wallet balance for {coin}, accountType={account_type}")
     path = "v5/account/wallet-balance"
     params = {"coin": coin, "accountType": account_type}
@@ -102,9 +100,6 @@ def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED"):
 
 
 def get_symbol_info(symbol: str):
-    """
-    Returns minimal contract qty, step size, and minimum notional value (USDT) for a symbol.
-    """
     logger.info(f"Fetching symbol info for {symbol}")
     path = "v5/market/instruments-info"
     params = {"category": "linear", "symbol": symbol}
@@ -120,9 +115,6 @@ def get_symbol_info(symbol: str):
 
 
 def get_ticker_price(symbol: str):
-    """
-    Fetches the current lastPrice for a symbol.
-    """
     path = "v5/market/tickers"
     params = {"category": "linear", "symbol": symbol}
     resp = http_get(path, params)
@@ -134,12 +126,7 @@ def get_ticker_price(symbol: str):
 def set_leverage(symbol: str, long_leverage: int = LONG_LEVERAGE, short_leverage: int = SHORT_LEVERAGE):
     logger.info(f"Setting leverage for {symbol}: long={long_leverage}, short={short_leverage}")
     path = "v5/position/set-leverage"
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "buyLeverage": long_leverage,
-        "sellLeverage": short_leverage
-    }
+    body = {"category": "linear", "symbol": symbol, "buyLeverage": long_leverage, "sellLeverage": short_leverage}
     resp = http_post(path, body)
     try:
         data = resp.json()
@@ -152,11 +139,6 @@ def set_leverage(symbol: str, long_leverage: int = LONG_LEVERAGE, short_leverage
 
 
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False):
-    """
-    Places a market order.
-    For BUY: uses 100% of USDT balance * leverage.
-    For SELL: qty interpreted as contract quantity.
-    """
     logger.info(f"Placing order: symbol={symbol}, side={side}, qty_param={qty}, reduce_only={reduce_only}")
     if side == "Buy" and not reduce_only:
         set_leverage(symbol, LONG_LEVERAGE, SHORT_LEVERAGE)
@@ -180,22 +162,15 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
             contracts = min_contract
         logger.debug(f"Calculated BUY contracts {contracts} for notional {notional} at {price}")
 
-    body = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": side,
-        "orderType": "Market",
-        "qty": str(contracts),
-        "timeInForce": "ImmediateOrCancel",
-        "reduceOnly": reduce_only
-    }
+    body = {"category": "linear", "symbol": symbol, "side": side,
+            "orderType": "Market", "qty": str(contracts),
+            "timeInForce": "ImmediateOrCancel", "reduceOnly": reduce_only}
     resp = http_post("v5/order/create", body)
     try:
         result = resp.json()
     except ValueError:
         logger.error(f"Order API no JSON: {resp.text}")
         return {"retCode": -1, "retMsg": resp.text}
-
     logger.info(f"Order response: {result}")
     return result
 
