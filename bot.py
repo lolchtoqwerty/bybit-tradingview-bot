@@ -12,7 +12,7 @@ from flask import Flask, request
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
-# Support two var names for Telegram
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
@@ -28,8 +28,7 @@ def sign_request(path: str, payload_str: str = "", query: str = ""):
     """
     Create timestamp and HMAC SHA256 signature for Bybit API v5.
     Path should NOT include leading slash, e.g. "v5/order/create".
-    payload_str: the exact JSON string to be sent (for POST).
-    query: raw query string without leading '?'.
+    payload_str: exact JSON string for POST; query: raw query string without '?' for GET.
     """
     ts = str(int(time.time() * 1000))
     request_path = f"/{path}"
@@ -51,7 +50,6 @@ def http_get(path: str, params: dict = None):
     url = f"{BASE_URL}/{path}"
     query = ''
     if params:
-        # sort params so signature matches
         query = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
     ts, sign = sign_request(path, query=query)
     headers = {
@@ -65,7 +63,6 @@ def http_get(path: str, params: dict = None):
 
 def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
-    # serialize with no spaces and sorted keys for consistent signing and sending
     payload_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
     ts, sign = sign_request(path, payload_str=payload_str)
     headers = {
@@ -75,7 +72,6 @@ def http_post(path: str, body: dict):
         "X-BAPI-SIGN": sign
     }
     logger.debug(f"[POST] {url} payload={payload_str} headers={headers}")
-    # send exact payload_str to match signature
     return requests.post(url, headers=headers, data=payload_str)
 
 # ——— Bybit Utilities ———
@@ -116,7 +112,6 @@ def set_leverage(symbol: str, long_leverage: int = 3, short_leverage: int = 1):
 
 
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
-    # for new positions, apply customized leverage
     if not reduce_only:
         set_leverage(symbol)
     try:
@@ -125,13 +120,14 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
         logger.error(f"Symbol info error: {e}")
         return {"retCode": -1, "retMsg": str(e)}
 
-    adjusted_qty = max(min_qty, step * round(qty / step))
+    # adjust quantity to valid step
+    adjusted = max(min_qty, step * round(qty / step))
     body = {
         "category": "linear",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
-        "qty": str(adjusted_qty),
+        "qty": str(adjusted),
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only
     }
@@ -141,7 +137,7 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
     except ValueError:
         logger.error(f"Order response not JSON: {resp.status_code} {resp.text}")
         return {"retCode": -1, "retMsg": "No JSON from order API"}
-    logger.info(f"Order {side} {symbol} qty={adjusted_qty} -> {result}")
+    logger.info(f"Order {side} {symbol} qty={adjusted} -> {result}")
     return result
 
 
