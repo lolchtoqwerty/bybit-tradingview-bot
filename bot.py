@@ -17,6 +17,9 @@ BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api-testnet.bybit.com")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
+LONG_LEVERAGE = 3  # кредитное плечо для лонга
+SHORT_LEVERAGE = 1  # кредитное плечо для шорта
+
 # ——— Logging Setup ———
 logging.basicConfig(
     level=logging.DEBUG,
@@ -26,9 +29,6 @@ logger = logging.getLogger(__name__)
 
 # ——— Signature Helper ———
 def sign_request(path: str, payload_str: str = "", query: str = ""):
-    """
-    Create timestamp and HMAC SHA256 signature for Bybit API v5.
-    """
     ts = str(int(time.time() * 1000))
     if payload_str:
         to_sign = ts + BYBIT_API_KEY + payload_str
@@ -79,6 +79,23 @@ def http_post(path: str, body: dict):
     return resp
 
 # ——— Bybit Utilities ———
+def get_wallet_balance(coin: str = "USDT"):
+    """
+    Returns available wallet balance for given coin.
+    """
+    logger.info(f"Fetching wallet balance for {coin}")
+    path = "v5/account/wallet-balance"
+    params = {"coin": coin}
+    resp = http_get(path, params)
+    data = resp.json()
+    # result.list[0].equity or .availableBalance depending on API
+    bal_info = data["result"]["list"][0]
+    # use availableBalance for margin
+    balance = float(bal_info.get("availableBalance", bal_info.get("equity", 0)))
+    logger.info(f"Wallet {coin} balance: {balance}")
+    return balance
+
+
 def get_symbol_info(symbol: str):
     """
     Returns minimal contract qty, step size, and minimum notional value (USDT) for a symbol.
@@ -109,7 +126,7 @@ def get_ticker_price(symbol: str):
     return price
 
 
-def set_leverage(symbol: str, long_leverage: int = 3, short_leverage: int = 1):
+def set_leverage(symbol: str, long_leverage: int = LONG_LEVERAGE, short_leverage: int = SHORT_LEVERAGE):
     logger.info(f"Setting leverage for {symbol}: long={long_leverage}, short={short_leverage}")
     path = "v5/position/set-leverage"
     body = {
@@ -129,34 +146,40 @@ def set_leverage(symbol: str, long_leverage: int = 3, short_leverage: int = 1):
     return data
 
 
-def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
+def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False):
     """
-    Places a market order where `qty` is interpreted as desired USDT notional amount.
+    Places a market order.
+    For BUY: qty ignored, uses 100% of USDT balance * leverage.
+    For SELL: qty interpreted as contract quantity.
     """
-    logger.info(f"Placing order: symbol={symbol}, side={side}, notional_usdt={qty}, reduce_only={reduce_only}")
-    if not reduce_only:
-        set_leverage(symbol)
+    logger.info(f"Placing order: symbol={symbol}, side={side}, qty_param={qty}, reduce_only={reduce_only}")
+    if not reduce_only and side == "Buy":
+        set_leverage(symbol, LONG_LEVERAGE, SHORT_LEVERAGE)
+        balance = get_wallet_balance("USDT")
+        notional = balance * LONG_LEVERAGE
+        logger.debug(f"Notional USDT for BUY: balance {balance} * leverage {LONG_LEVERAGE} = {notional}")
+    else:
+        # SELL or reduce, use provided qty as contracts
+        notional = None
+        contracts = qty
 
-    try:
-        min_contract, step, min_notional = get_symbol_info(symbol)
-    except Exception as e:
-        logger.error(f"get_symbol_info error: {e}")
-        return {"retCode": -1, "retMsg": str(e)}
-
+    # Fetch symbol filters
+    min_contract, step, min_notional = get_symbol_info(symbol)
     price = get_ticker_price(symbol)
 
-    # Проверка минимальной стоимости ордера
-    if qty < min_notional:
-        msg = f"Requested notional {qty} USDT is below minNotional {min_notional} USDT"
-        logger.error(msg)
-        return {"retCode": -1, "retMsg": msg}
+    if side == "Buy":
+        # Ensure meets min notional
+        if notional < min_notional:
+            msg = f"Calculated notional {notional} USDT below minNotional {min_notional}"
+            logger.error(msg)
+            return {"retCode": -1, "retMsg": msg}
+        # Calculate contracts = floor(notional / price / step) * step
+        contracts = step * floor(notional / (price * step))
+        if contracts < min_contract:
+            contracts = min_contract
+        logger.debug(f"Calculated BUY contracts {contracts} for notional {notional} at price {price}")
 
-    # Вычисляем количество контрактов: floor(qty_usdt / price / step) * step
-    contracts = step * floor(qty / (price * step))
-    if contracts < min_contract:
-        contracts = min_contract
-    logger.debug(f"Calculated contract qty {contracts} for USDT {qty} at price {price}")
-
+    # Build order
     body = {
         "category": "linear",
         "symbol": symbol,
@@ -197,12 +220,12 @@ def webhook():
     logger.debug(f"[Webhook] payload {payload}")
     symbol = payload.get("symbol")
     action = payload.get("side", "").lower()
-    qty = float(payload.get("qty", 0))  # interpreted as USDT
+    qty = float(payload.get("qty", 0))
     reduce_flag = action.startswith("exit")
     side = "Buy" if action in ["buy", "long"] else "Sell"
 
     result = place_order(symbol, side, qty, reduce_only=reduce_flag)
-    msg = f"{side} {symbol} notional={qty}USDT → {result}"
+    msg = f"{side} {symbol} qty={qty} → {result}"
     send_telegram(msg)
     return {"status": "ok"}
 
