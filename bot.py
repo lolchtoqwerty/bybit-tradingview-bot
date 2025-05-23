@@ -41,13 +41,9 @@ def http_get(path: str, params: dict = None):
     url = f"{BASE_URL}/{path}"
     query = '&'.join(f"{k}={v}" for k, v in (params or {}).items())
     ts, sign = sign_request(path, query=query)
-    headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-SIGN": sign
-    }
-    resp = requests.get(url, headers=headers, params=params)
-    return resp
+    headers = {"X-BAPI-API-KEY": BYBIT_API_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": sign}
+    return requests.get(url, headers=headers, params=params)
+
 
 def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
@@ -59,8 +55,7 @@ def http_post(path: str, body: dict):
         "X-BAPI-TIMESTAMP": ts,
         "X-BAPI-SIGN": sign
     }
-    resp = requests.post(url, headers=headers, data=payload_str)
-    return resp
+    return requests.post(url, headers=headers, data=payload_str)
 
 # ——— Bybit Utilities ———
 def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED") -> float:
@@ -74,11 +69,7 @@ def get_wallet_balance(coin: str = "USDT", account_type: str = "UNIFIED") -> flo
 def get_symbol_info(symbol: str):
     data = http_get("v5/market/instruments-info", {"category": "linear", "symbol": symbol}).json()
     filt = data.get("result", {}).get("list", [])[0].get("lotSizeFilter", {})
-    return (
-        float(filt.get("minOrderQty", 0)),
-        float(filt.get("qtyStep", 1)),
-        float(filt.get("minNotionalValue", 0))
-    )
+    return float(filt.get("minOrderQty", 0)), float(filt.get("qtyStep", 1)), float(filt.get("minNotionalValue", 0))
 
 
 def get_ticker_price(symbol: str) -> float:
@@ -97,23 +88,18 @@ def get_position_qty(symbol: str, side: str) -> float:
 def set_leverage(symbol: str):
     return http_post(
         "v5/position/set-leverage",
-        {
-            "category": "linear",
-            "symbol": symbol,
-            "buyLeverage": LONG_LEVERAGE,
-            "sellLeverage": SHORT_LEVERAGE
-        }
+        {"category": "linear", "symbol": symbol, "buyLeverage": LONG_LEVERAGE, "sellLeverage": SHORT_LEVERAGE}
     ).json()
 
 
 def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = False) -> dict:
     """
-    Executes a market order. Returns dict:
+    Executes a market order. Returns dict with:
       - result: API response
       - tradedQty: contracts traded
-      - remaining: remaining position size (if reduce_only)
+      - remaining: remaining contracts after reduce
     """
-    # Determine contract quantity
+    # Determine trade quantity
     if side == 'Buy' and not reduce_only:
         set_leverage(symbol)
         balance = get_wallet_balance()
@@ -122,8 +108,9 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         price = get_ticker_price(symbol)
         qty_contracts = max(min_c, step * floor(notional / (price * step)))
     elif reduce_only:
-        # for full close, use qty=0 and closeOnTrigger
-        qty_contracts = 0
+        # closing entire opposite position
+        opposite = 'Buy' if side == 'Sell' else 'Sell'
+        qty_contracts = get_position_qty(symbol, opposite)
     else:
         qty_contracts = qty
 
@@ -137,14 +124,10 @@ def place_order(symbol: str, side: str, qty: float = 0, reduce_only: bool = Fals
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only
     }
-    if reduce_only:
-        body["closeOnTrigger"] = True
-        body["positionIdx"] = 0
-
     resp = http_post("v5/order/create", body)
     result = resp.json()
 
-    # Fetch remaining position if closed
+    # Fetch remaining if reduced
     remaining = None
     if reduce_only:
         opposite = 'Buy' if side == 'Sell' else 'Sell'
@@ -174,7 +157,6 @@ def webhook():
 
     order = place_order(symbol, side, qty_param, reduce_only=reduce_flag)
 
-    # Compose message
     msg = f"{side} {symbol} traded={order['tradedQty']}"
     if order.get('remaining') is not None:
         msg += f" remaining={order['remaining']}"
