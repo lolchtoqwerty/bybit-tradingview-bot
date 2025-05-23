@@ -27,13 +27,13 @@ logger = logging.getLogger(__name__)
 def sign_request(path: str, body: dict = None, query: str = ""):
     """
     Create timestamp and HMAC SHA256 signature for Bybit API v5.
-    If body is provided, it will be JSON-dumped with no spaces and sorted keys.
+    Path should NOT include leading slash, e.g. "v5/order/create".
+    If body is provided, JSON-dump with no spaces and sorted keys.
     """
     ts = str(int(time.time() * 1000))
     if body is not None:
-        # compact JSON
-        payload_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        to_sign = ts + API_KEY + path + payload_str
+        payload = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        to_sign = ts + API_KEY + path + payload
     else:
         to_sign = ts + API_KEY + path + query
     signature = hmac.new(
@@ -45,7 +45,10 @@ def sign_request(path: str, body: dict = None, query: str = ""):
 
 
 def http_get(path: str, params: dict = None):
-    url = BASE_URL + path
+    """
+    Perform GET to BASE_URL/path, path without leading slash.
+    """
+    url = f"{BASE_URL}/{path}"
     query = ""
     if params:
         query = "&".join(f"{k}={v}" for k, v in params.items())
@@ -60,7 +63,10 @@ def http_get(path: str, params: dict = None):
 
 
 def http_post(path: str, body: dict):
-    url = BASE_URL + path
+    """
+    Perform POST to BASE_URL/path, path without leading slash.
+    """
+    url = f"{BASE_URL}/{path}"
     ts, sign = sign_request(path, body=body)
     headers = {
         "Content-Type": "application/json",
@@ -74,9 +80,9 @@ def http_post(path: str, body: dict):
 
 def get_symbol_info(symbol: str):
     """
-    Fetch minimum order quantity and step size for a given symbol.
+    Fetch min order qty and step size for a given symbol.
     """
-    path = "/v5/market/instruments-info"
+    path = "v5/market/instruments-info"
     params = {"category": "linear", "symbol": symbol}
     resp = http_get(path, params)
     data = resp.json()
@@ -94,30 +100,32 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
     try:
         min_qty, step = get_symbol_info(symbol)
     except Exception as e:
-        logger.error(f"Could not fetch symbol info: {e}")
+        logger.error(f"Symbol info error: {e}")
         return {"retCode": -1, "retMsg": "Symbol info error"}
 
-    # adjust quantity
-    adjusted_qty = max(min_qty, step * round(qty / step))
+    adjusted = max(min_qty, step * round(qty / step))
     body = {
         "category": "linear",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
-        "qty": str(adjusted_qty),
+        "qty": str(adjusted),
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only
     }
-    resp = http_post("/v5/order/create", body)
+    resp = http_post("v5/order/create", body)
     result = resp.json()
-    logger.info(f"Order {side} {symbol} qty={adjusted_qty} => {result}")
+    logger.info(f"Order {side} {symbol} qty={adjusted} -> {result}")
     return result
 
 
 def send_telegram(text: str):
     """
-    Send a message to configured Telegram chat.
+    Send a message to Telegram chat.
     """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.error("Telegram token or chat ID not set")
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
     requests.post(url, json=payload)
@@ -131,14 +139,14 @@ def webhook():
     payload = request.get_json(force=True)
     logger.debug(f"[Webhook] payload {payload}")
     symbol = payload.get("symbol")
-    action = payload.get("side").lower()
+    action = payload.get("side", "").lower()
     qty = float(payload.get("qty", 0))
     reduce_flag = action.startswith("exit")
     side = "Buy" if action in ["buy", "long"] else "Sell"
 
     result = place_order(symbol, side, qty, reduce_only=reduce_flag)
-    text = f"{side} {symbol} qty={qty} → {result}"
-    send_telegram(text)
+    msg = f"{side} {symbol} qty={qty} → {result}"
+    send_telegram(msg)
     return {"status": "ok"}
 
 
