@@ -7,7 +7,7 @@ import hashlib
 import logging
 import requests
 from flask import Flask, request
-from math import ceil
+from math import floor
 
 # ——— Configuration ———
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 def sign_request(path: str, payload_str: str = "", query: str = ""):
     """
     Create timestamp and HMAC SHA256 signature for Bybit API v5.
-    Body-only signature due to testnet path signing discrepancy.
     """
     ts = str(int(time.time() * 1000))
     if payload_str:
@@ -82,7 +81,7 @@ def http_post(path: str, body: dict):
 # ——— Bybit Utilities ———
 def get_symbol_info(symbol: str):
     """
-    Returns minimal quantity, step size, and minimum notional value for a given symbol.
+    Returns minimal contract qty, step size, and minimum notional value (USDT) for a symbol.
     """
     logger.info(f"Fetching symbol info for {symbol}")
     path = "v5/market/instruments-info"
@@ -91,11 +90,11 @@ def get_symbol_info(symbol: str):
     data = resp.json()
     info = data["result"]["list"][0]
     filters = info.get("lotSizeFilter", {})
-    min_qty = float(filters.get("minOrderQty", 0))
+    min_contract = float(filters.get("minOrderQty", 0))
     step = float(filters.get("qtyStep", 1))
     min_notional = float(filters.get("minNotionalValue", 0))
-    logger.info(f"Symbol {symbol}: minQty={min_qty}, step={step}, minNotional={min_notional}")
-    return min_qty, step, min_notional
+    logger.info(f"Symbol {symbol}: minContract={min_contract}, step={step}, minNotional={min_notional}")
+    return min_contract, step, min_notional
 
 
 def get_ticker_price(symbol: str):
@@ -120,42 +119,60 @@ def set_leverage(symbol: str, long_leverage: int = 3, short_leverage: int = 1):
         "sellLeverage": short_leverage
     }
     resp = http_post(path, body)
-    data = resp.json() if resp.text else {}
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.error(f"Leverage API no JSON: {resp.text}")
+        return {"retCode": -1, "retMsg": "No JSON from leverage API"}
     if data.get("retCode") != 0:
         logger.warning(f"Leverage set failed: {data.get('retMsg')}")
     return data
 
 
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool = False):
-    logger.info(f"Placing order: symbol={symbol}, side={side}, qty={qty}, reduce_only={reduce_only}")
+    """
+    Places a market order where `qty` is interpreted as desired USDT notional amount.
+    """
+    logger.info(f"Placing order: symbol={symbol}, side={side}, notional_usdt={qty}, reduce_only={reduce_only}")
     if not reduce_only:
         set_leverage(symbol)
 
     try:
-        min_qty, step, min_notional = get_symbol_info(symbol)
+        min_contract, step, min_notional = get_symbol_info(symbol)
     except Exception as e:
         logger.error(f"get_symbol_info error: {e}")
         return {"retCode": -1, "retMsg": str(e)}
 
     price = get_ticker_price(symbol)
 
-    # Calculate adjusted qty to satisfy step size and notional requirements
-    qty_step = step * ceil(qty / step)
-    qty_notional = step * ceil(min_notional / (price * step))
-    adjusted = max(min_qty, qty_step, qty_notional)
-    logger.debug(f"Adjusted qty from {qty} to {adjusted}")
+    # Проверка минимальной стоимости ордера
+    if qty < min_notional:
+        msg = f"Requested notional {qty} USDT is below minNotional {min_notional} USDT"
+        logger.error(msg)
+        return {"retCode": -1, "retMsg": msg}
+
+    # Вычисляем количество контрактов: floor(qty_usdt / price / step) * step
+    contracts = step * floor(qty / (price * step))
+    if contracts < min_contract:
+        contracts = min_contract
+    logger.debug(f"Calculated contract qty {contracts} for USDT {qty} at price {price}")
 
     body = {
         "category": "linear",
         "symbol": symbol,
         "side": side,
         "orderType": "Market",
-        "qty": str(adjusted),
+        "qty": str(contracts),
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only
     }
     resp = http_post("v5/order/create", body)
-    result = resp.json() if resp.text else {"retCode": -1, "retMsg": resp.text}
+    try:
+        result = resp.json()
+    except ValueError:
+        logger.error(f"Order API no JSON: {resp.text}")
+        return {"retCode": -1, "retMsg": resp.text}
+
     logger.info(f"Order response: {result}")
     return result
 
@@ -180,12 +197,12 @@ def webhook():
     logger.debug(f"[Webhook] payload {payload}")
     symbol = payload.get("symbol")
     action = payload.get("side", "").lower()
-    qty = float(payload.get("qty", 0))
+    qty = float(payload.get("qty", 0))  # interpreted as USDT
     reduce_flag = action.startswith("exit")
     side = "Buy" if action in ["buy", "long"] else "Sell"
 
     result = place_order(symbol, side, qty, reduce_only=reduce_flag)
-    msg = f"{side} {symbol} qty={qty} → {result}"
+    msg = f"{side} {symbol} notional={qty}USDT → {result}"
     send_telegram(msg)
     return {"status": "ok"}
 
