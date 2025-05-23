@@ -46,9 +46,7 @@ def sign_v5(timestamp: str, recv_window: str, req_path: str, body: str = "") -> 
 def bybit_get(path: str, params: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    # Build query string
     query = '&'.join(f"{k}={v}" for k, v in params.items())
-    # Signature for GET uses only query string
     signature = sign_v5(timestamp, recv_window, query)
     headers = {
         "X-BAPI-API-KEY": API_KEY,
@@ -69,7 +67,6 @@ def bybit_get(path: str, params: dict) -> dict:
 def bybit_post(path: str, body: dict) -> dict:
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    # For POST, signature path excludes leading slash
     req_path = path.lstrip('/')
     payload = json.dumps(body)
     signature = sign_v5(timestamp, recv_window, req_path, payload)
@@ -91,12 +88,10 @@ def bybit_post(path: str, body: dict) -> dict:
 
 # Business helpers
 def get_balance() -> float:
-    # Получаем баланс всех монет в аккаунте UNIFIED
     data = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"})
     accounts = data.get('result', {}).get('list', [])
     for acct in accounts:
-        coins = acct.get('coin', [])
-        for c in coins:
+        for c in acct.get('coin', []):
             if c.get('coin') == 'USDT':
                 balance = float(c.get('walletBalance', 0))
                 logger.info(f"[Balance] USDT walletBalance {balance}")
@@ -106,27 +101,29 @@ def get_balance() -> float:
 
 def get_mark_price(symbol: str) -> float:
     data = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": symbol})
-    items = data.get('result', {}).get('list', [])
-    if not items:
+    lst = data.get('result', {}).get('list', [])
+    if not lst:
         logger.warning("[Price] no data")
         return None
-    price = float(items[0].get('lastPrice', 0))
+    price = float(lst[0].get('lastPrice', 0))
     logger.info(f"[Price] {symbol} lastPrice {price}")
     return price
 
 def get_position_size(symbol: str) -> float:
     data = bybit_get("/v5/position/list", {"category": "linear", "symbol": symbol})
-    items = data.get('result', {}).get('list', [])
-    if not items:
+    lst = data.get('result', {}).get('list', [])
+    if not lst:
         return 0.0
-    size = float(items[0].get('size', 0))
-    logger.info(f"[Position] {symbol} size {size}")
-    return size
+    pos = lst[0]
+    size = float(pos.get('size', 0))
+    side_str = pos.get('side', '').lower()
+    signed = -size if side_str == 'sell' else size
+    logger.info(f"[Position] {symbol} size {size} side {side_str} signed {signed}")
+    return signed
 
 def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> dict:
     price = get_mark_price(symbol)
     if price:
-        # enforce minimum 5 USDT notional
         min_qty = math.ceil(5 / price)
         if qty < min_qty:
             logger.warning(f"[Order] adjust qty {qty}->{min_qty}")
@@ -140,10 +137,10 @@ def place_order(symbol: str, side: str, qty: float, reduce_only: bool=False) -> 
         "timeInForce": "ImmediateOrCancel",
         "reduceOnly": reduce_only,
     }
-    result = bybit_post("/v5/order/create", body)
-    logger.info(f"[Order] {side} {symbol} qty {qty} => {result}")
-    send_telegram(f"{side} {symbol} qty={qty} → {result}")
-    return result
+    res = bybit_post("/v5/order/create", body)
+    logger.info(f"[Order] {side} {symbol} qty {qty} => {res}")
+    send_telegram(f"{side} {symbol} qty={qty} → {res}")
+    return res
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
