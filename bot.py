@@ -18,7 +18,7 @@ RECV_WINDOW      = "5000"
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
-LONG_LEVERAGE  = 3  # leverage для лонга
+LONG_LEVERAGE  = 2  # leverage для лонга
 SHORT_LEVERAGE = 1  # leverage для шорта
 
 # ——— Logging Setup ———
