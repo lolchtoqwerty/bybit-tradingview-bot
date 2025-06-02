@@ -1,4 +1,4 @@
-# bot.py — Bybit TradingView Webhook Bot (Mainnet) with Enhanced Telegram Messages and Accurate PnL
+# bot.py — Bybit TradingView Webhook Bot (Mainnet) with Enhanced Telegram Messages — Long-only, 3× Leverage
 import os
 import time
 import json
@@ -6,8 +6,9 @@ import hmac
 import hashlib
 import logging
 import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from math import floor
+from datetime import datetime
 
 # ——— Configuration ———
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY")
@@ -18,12 +19,11 @@ RECV_WINDOW      = "5000"
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
-LONG_LEVERAGE  = 2  # leverage для лонга
-SHORT_LEVERAGE = 1  # leverage для шорта
+LONG_LEVERAGE    = 3  # leverage for long positions
 
 # ——— Logging Setup ———
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def http_get(path: str, params: dict = None):
     query = '&'.join(f"{k}={v}" for k, v in (params or {}).items())
     ts, sign = sign_request(query=query)
     headers = {
-        "Content-Type":      "application/json",
+        "Content-Type":       "application/json",
         "X-BAPI-API-KEY":     BYBIT_API_KEY,
         "X-BAPI-TIMESTAMP":   ts,
         "X-BAPI-RECV-WINDOW": RECV_WINDOW,
@@ -51,13 +51,12 @@ def http_get(path: str, params: dict = None):
     logger.debug(f"GET {path}?{query} → {resp.status_code} {resp.text}")
     return resp
 
-
 def http_post(path: str, body: dict):
     url = f"{BASE_URL}/{path}"
     payload_str = json.dumps(body, separators=(',', ':'), sort_keys=True)
     ts, sign = sign_request(payload_str=payload_str)
     headers = {
-        "Content-Type":      "application/json",
+        "Content-Type":       "application/json",
         "X-BAPI-API-KEY":     BYBIT_API_KEY,
         "X-BAPI-TIMESTAMP":   ts,
         "X-BAPI-RECV-WINDOW": RECV_WINDOW,
@@ -69,37 +68,51 @@ def http_post(path: str, body: dict):
 
 # ——— Bybit Utilities ———
 def get_wallet_balance() -> float:
-    data = http_get("v5/account/wallet-balance", {"coin":"USDT","accountType":"UNIFIED"}).json()
-    return float(data["result"]["list"][0].get("totalAvailableBalance", 0)) if data.get("retCode")==0 else 0.0
-
+    data = http_get("v5/account/wallet-balance", {"coin": "USDT", "accountType": "UNIFIED"}).json()
+    if data.get("retCode") == 0:
+        return float(data["result"]["list"][0].get("totalAvailableBalance", 0))
+    else:
+        logger.error(f"Failed to fetch wallet balance: {data}")
+        return 0.0
 
 def get_symbol_info(symbol: str):
-    lst = http_get("v5/market/instruments-info", {"category":"linear","symbol":symbol}).json()["result"]["list"]
-    filt = lst[0]["lotSizeFilter"]
-    return float(filt["minOrderQty"]), float(filt["qtyStep"])
-
+    data = http_get("v5/market/instruments-info", {"category": "linear", "symbol": symbol}).json()
+    if data.get("retCode") == 0:
+        filt = data["result"]["list"][0]["lotSizeFilter"]
+        return float(filt["minOrderQty"]), float(filt["qtyStep"])
+    else:
+        logger.error(f"Failed to fetch symbol info for {symbol}: {data}")
+        return 0.0, 0.0
 
 def get_ticker_price(symbol: str) -> float:
-    return float(http_get("v5/market/tickers", {"category":"linear","symbol":symbol}).json()["result"]["list"][0]["lastPrice"])
-
+    data = http_get("v5/market/tickers", {"category": "linear", "symbol": symbol}).json()
+    try:
+        return float(data["result"]["list"][0]["lastPrice"])
+    except Exception as e:
+        logger.error(f"Failed to fetch ticker price for {symbol}: {e}")
+        return 0.0
 
 def get_positions(symbol: str):
-    return http_get("v5/position/list", {"category":"linear","symbol":symbol}).json()["result"]["list"]
-
-
-def set_leverage(symbol: str):
-    body={"category":"linear","symbol":symbol,"buy_leverage":LONG_LEVERAGE,
-          "sell_leverage":SHORT_LEVERAGE,"position_idx":0}
-    return http_post("v5/position/set-leverage", body)
-
+    data = http_get("v5/position/list", {"category": "linear", "symbol": symbol}).json()
+    return data.get("result", {}).get("list", [])
 
 def get_executions(symbol: str, order_id: str):
-    return http_get("v5/execution/list", {"category":"linear","symbol":symbol,"orderId":order_id}).json()["result"]["list"]
+    data = http_get("v5/execution/list", {"category": "linear", "symbol": symbol, "orderId": order_id}).json()
+    return data.get("result", {}).get("list", [])
 
-# ——— Send Telegram ———
+# ——— Send Telegram Message ———
 def send_telegram(text: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id":TELEGRAM_CHAT_ID,"text":text})
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": text}
+            )
+            logger.debug(f"Telegram send → {resp.status_code} {resp.text}")
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+    else:
+        logger.warning("Telegram token or chat ID not set; skipping Telegram notification.")
 
 # ——— Flask App ———
 app = Flask(__name__)
@@ -107,77 +120,116 @@ app = Flask(__name__)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True)
-    symbol = data.get('symbol')
-    side_cmd = data.get('side','').lower()
+    logger.info(f"▶ Получен Webhook: {json.dumps(data)}")
 
-    # Открытие лонга/шорта
-    if side_cmd in ('buy','sell'):
-        side = 'Buy' if side_cmd=='buy' else 'Sell'
-        set_leverage(symbol)
+    symbol   = data.get('symbol')
+    side_cmd = data.get('side', '').lower()
+
+    if not symbol or not side_cmd:
+        logger.warning(f"Ignoring webhook with missing symbol or side: {data}")
+        return jsonify({"status": "ignored", "reason": "missing symbol or side"}), 200
+
+    # ——— Open Long ———
+    if side_cmd == 'buy':
+        # Set leverage — теперь только buy_leverage
+        logger.info(f"Setting leverage {LONG_LEVERAGE}× for {symbol}")
+        http_post("v5/position/set-leverage", {
+            "category":     "linear",
+            "symbol":       symbol,
+            "buy_leverage": LONG_LEVERAGE,
+            "position_idx": 0
+        })
+
         balance = get_wallet_balance()
         min_q, step = get_symbol_info(symbol)
         price = get_ticker_price(symbol)
-        lev = LONG_LEVERAGE if side=='Buy' else SHORT_LEVERAGE
-        qty = max(min_q, step * floor((balance * lev) / (price * step)))
-        res = http_post("v5/order/create", {"category":"linear","symbol":symbol,
-                                              "side":side,"orderType":"Market",
-                                              "qty":str(qty),"timeInForce":"ImmediateOrCancel"})
-        order_id = res.json().get("result",{}).get("orderId","")
-        execs = get_executions(symbol, order_id)
-        avg_price = (sum(float(e['execPrice']) * float(e['execQty']) for e in execs) /
-                     sum(float(e['execQty']) for e in execs)) if execs else price
-        pct = (qty * avg_price / lev) / balance * 100 if balance>0 else 0
-        txt = (f"{'Лонг' if side=='Buy' else 'Шорт'}: {symbol}\n"
-               f"Цена входа: {avg_price:.4f}\n"
-               f"Процент от депозита: {pct:.2f}%\n"
-               f"Плечо: {lev}x")
-        send_telegram(txt)
-        return {"status":"ok"}
+        if price <= 0 or step <= 0:
+            logger.error(f"Invalid price or step for {symbol}: price={price}, step={step}")
+            return jsonify({"status": "error", "reason": "invalid price or step"}), 200
 
-    # Закрытие позиции
-    if side_cmd == 'exit':
-        # Получаем открытую позицию
-        positions = get_positions(symbol)
-        original = None
-        for p in positions:
-            size = float(p['size'])
-            if size > 0 and p['side'] == 'Buy':
-                original = ('Buy', size, float(p['avgPrice']))
-                break
-            if size > 0 and p['side'] == 'Sell':
-                original = ('Sell', size, float(p['avgPrice']))
-                break
-        if not original:
-            return {"status":"no_position"}
-        orig_side, qty, entry_price = original
-        balance_before = get_wallet_balance()
-        # Закрывающий side
-        close_side = 'Sell' if orig_side=='Buy' else 'Buy'
-        res = http_post("v5/order/create", {"category":"linear","symbol":symbol,
-                                              "side":close_side,"orderType":"Market",
-                                              "qty":str(qty),"timeInForce":"ImmediateOrCancel",
-                                              "reduce_only":True})
-        order_id = res.json().get("result",{}).get("orderId","")
+        qty = max(min_q, step * floor((balance * LONG_LEVERAGE) / (price * step)))
+        logger.info(f"Calculated order quantity for {symbol}: {qty}")
+
+        res = http_post("v5/order/create", {
+            "category":    "linear",
+            "symbol":      symbol,
+            "side":        "Buy",
+            "orderType":   "Market",
+            "qty":         str(qty),
+            "timeInForce": "ImmediateOrCancel"
+        })
+        resp_data = res.json()
+        if resp_data.get("retCode") != 0:
+            logger.error(f"Failed to create long order: {resp_data}")
+            return jsonify({"status": "error", "reason": resp_data}), 200
+
+        order_id = resp_data["result"].get("orderId", "")
         execs = get_executions(symbol, order_id)
-        # Средняя цена выхода
-        exit_price = (sum(float(e['execPrice']) * float(e['execQty']) for e in execs) /
-                      sum(float(e['execQty']) for e in execs)) if execs else entry_price
-        # PnL
-        if orig_side == 'Buy':
-            pnl = (exit_price - entry_price) * qty
+        if execs:
+            avg_price = sum(float(e['execPrice']) * float(e['execQty']) for e in execs) / sum(float(e['execQty']) for e in execs)
         else:
-            pnl = (entry_price - exit_price) * qty
-        # Комиссия
-        fee = sum(float(e.get('execFee',0)) for e in execs)
+            avg_price = price
+
+        pct = (qty * avg_price / LONG_LEVERAGE) / balance * 100 if balance > 0 else 0
+        msg = (
+            f"🔹 Лонг открыт: {symbol}\n"
+            f"• Цена входа: {avg_price:.4f}\n"
+            f"• Риск: {pct:.2f}% от депозита\n"
+            f"• Плечо: {LONG_LEVERAGE}×"
+        )
+        logger.info(msg)
+        send_telegram(msg)
+        return jsonify({"status": "ok"}), 200
+
+    # ——— Close Long ———
+    if side_cmd == 'exit':
+        positions = get_positions(symbol)
+        original = next((p for p in positions if p['side'] == 'Buy' and float(p['size']) > 0), None)
+        if not original:
+            logger.warning(f"No open long position to close for {symbol}")
+            return jsonify({"status": "no_position"}), 200
+
+        qty = float(original['size'])
+        entry_price = float(original['avgPrice'])
+        balance_before = get_wallet_balance()
+        res = http_post("v5/order/create", {
+            "category":    "linear",
+            "symbol":      symbol,
+            "side":        "Sell",
+            "orderType":   "Market",
+            "qty":         str(qty),
+            "timeInForce": "ImmediateOrCancel",
+            "reduce_only": True
+        })
+        resp_data = res.json()
+        if resp_data.get("retCode") != 0:
+            logger.error(f"Failed to create close order: {resp_data}")
+            return jsonify({"status": "error", "reason": resp_data}), 200
+
+        order_id = resp_data["result"].get("orderId", "")
+        execs = get_executions(symbol, order_id)
+        if execs:
+            exit_price = sum(float(e['execPrice']) * float(e['execQty']) for e in execs) / sum(float(e['execQty']) for e in execs)
+        else:
+            exit_price = entry_price
+
+        pnl = (exit_price - entry_price) * qty
+        fee = sum(float(e.get('execFee', 0)) for e in execs)
         net_pnl = pnl - fee
-        pct_change = net_pnl / balance_before * 100 if balance_before>0 else 0
-        side_text = 'Лонг закрыт' if orig_side=='Buy' else 'Шорт закрыт'
-        txt = (f"{side_text}: {symbol}\n"
-               f"Изменение баланса: {pct_change:+.2f}%")
-        send_telegram(txt)
-        return {"status":"ok"}
+        pct_change = net_pnl / balance_before * 100 if balance_before > 0 else 0
+        msg = (
+            f"🔹 Лонг закрыт: {symbol}\n"
+            f"• PnL: {net_pnl:.4f} USDT ({pct_change:+.2f}%)\n"
+            f"• Цена выхода: {exit_price:.4f}"
+        )
+        logger.info(msg)
+        send_telegram(msg)
+        return jsonify({"status": "ok"}), 200
 
-    return {"status":"ignored"}
+    logger.info(f"Ignored webhook with side='{side_cmd}' for {symbol}")
+    return jsonify({"status": "ignored"}), 200
 
-if __name__=='__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT',10000)))
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 10000))
+    logger.info(f"Starting Flask server on port {port}")
+    app.run(host='0.0.0.0', port=port)
