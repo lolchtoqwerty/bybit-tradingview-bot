@@ -8,7 +8,7 @@ import requests
 from flask import Flask, request, jsonify
 from math import floor
 
-# ——— Configuration ———
+# — Configuration —
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 BASE_URL         = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com")
@@ -18,23 +18,23 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
 LONG_LEVERAGE    = 3  # плечо для лонга
-SHORT_LEVERAGE   = 1  # плечо для шорта (вы можете изменить, если нужно другое)
+SHORT_LEVERAGE   = 1  # плечо для шорта (можете изменить при необходимости)
 
-// ——— Logging Setup ———
+# — Logging Setup —
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ——— Signature Helper ———
+# — Signature Helper —
 def sign_request(payload_str: str = "", query: str = ""):
     ts = str(int(time.time() * 1000))
     to_sign = ts + BYBIT_API_KEY + RECV_WINDOW + (payload_str or query)
     signature = hmac.new(BYBIT_API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
     return ts, signature
 
-# ——— HTTP Helpers ———
+# — HTTP Helpers —
 def http_get(path: str, params: dict = None):
     url = f"{BASE_URL}/{path}"
     query = '&'.join(f"{k}={v}" for k, v in (params or {}).items())
@@ -65,7 +65,7 @@ def http_post(path: str, body: dict):
     logger.debug(f"POST {path} {payload_str} → {resp.status_code} {resp.text}")
     return resp
 
-# ——— Bybit Utilities ———
+# — Bybit Utilities —
 def get_wallet_balance() -> float:
     data = http_get("v5/account/wallet-balance", {"coin": "USDT", "accountType": "UNIFIED"}).json()
     if data.get("retCode") == 0:
@@ -99,7 +99,7 @@ def get_executions(symbol: str, order_id: str):
     data = http_get("v5/execution/list", {"category": "linear", "symbol": symbol, "orderId": order_id}).json()
     return data.get("result", {}).get("list", [])
 
-# ——— Send Telegram Message ———
+# — Send Telegram Message —
 def send_telegram(text: str):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         try:
@@ -113,13 +113,13 @@ def send_telegram(text: str):
     else:
         logger.warning("Telegram token or chat ID not set; skipping Telegram notification.")
 
-# ——— Flask App ———
+# — Flask App —
 app = Flask(__name__)
 
 # 1) Обработка GET & HEAD – возвращаем короткий ответ
 @app.route('/webhook', methods=['GET', 'HEAD'])
 def webhook_get():
-    return "🦄 Этот эндпоинт принимает только POST-запросы. Пожалуйста, сделайте POST.", 200
+    return "Этот эндпоинт принимает только POST-запросы. Пожалуйста, сделайте POST.", 200
 
 # 2) Обработка POST — основная логика
 @app.route('/webhook', methods=['POST'])
@@ -134,10 +134,9 @@ def webhook_post():
         logger.warning(f"Ignoring webhook with missing symbol or side: {data}")
         return jsonify({"status": "ignored", "reason": "missing symbol or side"}), 200
 
-    # ——— Открыть лонг (side == "buy") ———
+    # — Открыть лонг (side == "buy")
     if side_cmd == 'buy':
         logger.info(f"▶ Пришёл сигнал BUY для {symbol}")
-        # Сначала ставим плечо для лонга
         http_post("v5/position/set-leverage", {
             "category":     "linear",
             "symbol":       symbol,
@@ -186,15 +185,14 @@ def webhook_post():
         send_telegram(msg)
         return jsonify({"status": "ok"}), 200
 
-    # ——— Открыть шорт (side == "sell") ———
+    # — Открыть шорт (side == "sell")
     if side_cmd == 'sell':
         logger.info(f"▶ Пришёл сигнал SELL для {symbol}")
-        # Сначала ставим плечо для шорта
         http_post("v5/position/set-leverage", {
-            "category":     "linear",
-            "symbol":       symbol,
+            "category":      "linear",
+            "symbol":        symbol,
             "sell_leverage": SHORT_LEVERAGE,
-            "position_idx": 1
+            "position_idx":  1
         })
 
         balance = get_wallet_balance()
@@ -238,7 +236,7 @@ def webhook_post():
         send_telegram(msg)
         return jsonify({"status": "ok"}), 200
 
-    # ——— Закрыть лонг (side == "exit long") ———
+    # — Закрыть лонг (side == "exit long")
     if side_cmd == 'exit long':
         logger.info(f"▶ Пришёл сигнал EXIT LONG для {symbol}")
         positions = get_positions(symbol)
@@ -284,7 +282,7 @@ def webhook_post():
         send_telegram(msg)
         return jsonify({"status": "ok"}), 200
 
-    # ——— Закрыть шорт (side == "exit short") ———
+    # — Закрыть шорт (side == "exit short")
     if side_cmd == 'exit short':
         logger.info(f"▶ Пришёл сигнал EXIT SHORT для {symbol}")
         positions = get_positions(symbol)
@@ -331,7 +329,7 @@ def webhook_post():
         send_telegram(msg)
         return jsonify({"status": "ok"}), 200
 
-    # ——— Любой другой side — игнорируем ———
+    # — Любой другой side — игнорируем —
     logger.info(f"Ignored webhook with side='{side_cmd}' for {symbol}")
     return jsonify({"status": "ignored"}), 200
 
