@@ -1,4 +1,3 @@
-# bot.py — Bybit TradingView Webhook Bot (Mainnet) with Enhanced Telegram Messages — Long-only, 3× Leverage
 import os
 import time
 import json
@@ -8,7 +7,6 @@ import logging
 import requests
 from flask import Flask, request, jsonify
 from math import floor
-from datetime import datetime
 
 # ——— Configuration ———
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY")
@@ -19,9 +17,10 @@ RECV_WINDOW      = "5000"
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 
-LONG_LEVERAGE    = 3  # leverage for long positions
+LONG_LEVERAGE    = 3  # плечо для лонга
+SHORT_LEVERAGE   = 1  # плечо для шорта (вы можете изменить, если нужно другое)
 
-# ——— Logging Setup ———
+// ——— Logging Setup ———
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
@@ -117,8 +116,14 @@ def send_telegram(text: str):
 # ——— Flask App ———
 app = Flask(__name__)
 
+# 1) Обработка GET & HEAD – возвращаем короткий ответ
+@app.route('/webhook', methods=['GET', 'HEAD'])
+def webhook_get():
+    return "🦄 Этот эндпоинт принимает только POST-запросы. Пожалуйста, сделайте POST.", 200
+
+# 2) Обработка POST — основная логика
 @app.route('/webhook', methods=['POST'])
-def webhook():
+def webhook_post():
     data = request.get_json(force=True)
     logger.info(f"▶ Получен Webhook: {json.dumps(data)}")
 
@@ -129,10 +134,10 @@ def webhook():
         logger.warning(f"Ignoring webhook with missing symbol or side: {data}")
         return jsonify({"status": "ignored", "reason": "missing symbol or side"}), 200
 
-    # ——— Open Long ———
+    # ——— Открыть лонг (side == "buy") ———
     if side_cmd == 'buy':
-        # Set leverage — теперь только buy_leverage
-        logger.info(f"Setting leverage {LONG_LEVERAGE}× for {symbol}")
+        logger.info(f"▶ Пришёл сигнал BUY для {symbol}")
+        # Сначала ставим плечо для лонга
         http_post("v5/position/set-leverage", {
             "category":     "linear",
             "symbol":       symbol,
@@ -181,8 +186,61 @@ def webhook():
         send_telegram(msg)
         return jsonify({"status": "ok"}), 200
 
-    # ——— Close Long ———
-    if side_cmd == 'exit':
+    # ——— Открыть шорт (side == "sell") ———
+    if side_cmd == 'sell':
+        logger.info(f"▶ Пришёл сигнал SELL для {symbol}")
+        # Сначала ставим плечо для шорта
+        http_post("v5/position/set-leverage", {
+            "category":     "linear",
+            "symbol":       symbol,
+            "sell_leverage": SHORT_LEVERAGE,
+            "position_idx": 1
+        })
+
+        balance = get_wallet_balance()
+        min_q, step = get_symbol_info(symbol)
+        price = get_ticker_price(symbol)
+        if price <= 0 or step <= 0:
+            logger.error(f"Invalid price or step for {symbol}: price={price}, step={step}")
+            return jsonify({"status": "error", "reason": "invalid price or step"}), 200
+
+        qty = max(min_q, step * floor((balance * SHORT_LEVERAGE) / (price * step)))
+        logger.info(f"Calculated SHORT order quantity for {symbol}: {qty}")
+
+        res = http_post("v5/order/create", {
+            "category":    "linear",
+            "symbol":      symbol,
+            "side":        "Sell",
+            "orderType":   "Market",
+            "qty":         str(qty),
+            "timeInForce": "ImmediateOrCancel"
+        })
+        resp_data = res.json()
+        if resp_data.get("retCode") != 0:
+            logger.error(f"Failed to create short order: {resp_data}")
+            return jsonify({"status": "error", "reason": resp_data}), 200
+
+        order_id = resp_data["result"].get("orderId", "")
+        execs = get_executions(symbol, order_id)
+        if execs:
+            avg_price = sum(float(e['execPrice']) * float(e['execQty']) for e in execs) / sum(float(e['execQty']) for e in execs)
+        else:
+            avg_price = price
+
+        pct = (qty * avg_price / SHORT_LEVERAGE) / balance * 100 if balance > 0 else 0
+        msg = (
+            f"🔻 Шорт открыт: {symbol}\n"
+            f"• Цена входа: {avg_price:.4f}\n"
+            f"• Риск: {pct:.2f}% от депозита\n"
+            f"• Плечо: {SHORT_LEVERAGE}×"
+        )
+        logger.info(msg)
+        send_telegram(msg)
+        return jsonify({"status": "ok"}), 200
+
+    # ——— Закрыть лонг (side == "exit long") ———
+    if side_cmd == 'exit long':
+        logger.info(f"▶ Пришёл сигнал EXIT LONG для {symbol}")
         positions = get_positions(symbol)
         original = next((p for p in positions if p['side'] == 'Buy' and float(p['size']) > 0), None)
         if not original:
@@ -203,7 +261,7 @@ def webhook():
         })
         resp_data = res.json()
         if resp_data.get("retCode") != 0:
-            logger.error(f"Failed to create close order: {resp_data}")
+            logger.error(f"Failed to create close long order: {resp_data}")
             return jsonify({"status": "error", "reason": resp_data}), 200
 
         order_id = resp_data["result"].get("orderId", "")
@@ -226,6 +284,54 @@ def webhook():
         send_telegram(msg)
         return jsonify({"status": "ok"}), 200
 
+    # ——— Закрыть шорт (side == "exit short") ———
+    if side_cmd == 'exit short':
+        logger.info(f"▶ Пришёл сигнал EXIT SHORT для {symbol}")
+        positions = get_positions(symbol)
+        original = next((p for p in positions if p['side'] == 'Sell' and float(p['size']) > 0), None)
+        if not original:
+            logger.warning(f"No open short position to close for {symbol}")
+            return jsonify({"status": "no_position"}), 200
+
+        qty = float(original['size'])
+        entry_price = float(original['avgPrice'])
+        balance_before = get_wallet_balance()
+        res = http_post("v5/order/create", {
+            "category":    "linear",
+            "symbol":      symbol,
+            "side":        "Buy",
+            "orderType":   "Market",
+            "qty":         str(qty),
+            "timeInForce": "ImmediateOrCancel",
+            "reduce_only": True
+        })
+        resp_data = res.json()
+        if resp_data.get("retCode") != 0:
+            logger.error(f"Failed to create close short order: {resp_data}")
+            return jsonify({"status": "error", "reason": resp_data}), 200
+
+        order_id = resp_data["result"].get("orderId", "")
+        execs = get_executions(symbol, order_id)
+        if execs:
+            exit_price = sum(float(e['execPrice']) * float(e['execQty']) for e in execs) / sum(float(e['execQty']) for e in execs)
+        else:
+            exit_price = entry_price
+
+        # Прибыль для шорта: (entry_price - exit_price) * qty
+        pnl = (entry_price - exit_price) * qty
+        fee = sum(float(e.get('execFee', 0)) for e in execs)
+        net_pnl = pnl - fee
+        pct_change = net_pnl / balance_before * 100 if balance_before > 0 else 0
+        msg = (
+            f"🔻 Шорт закрыт: {symbol}\n"
+            f"• PnL: {net_pnl:.4f} USDT ({pct_change:+.2f}%)\n"
+            f"• Цена выхода: {exit_price:.4f}"
+        )
+        logger.info(msg)
+        send_telegram(msg)
+        return jsonify({"status": "ok"}), 200
+
+    # ——— Любой другой side — игнорируем ———
     logger.info(f"Ignored webhook with side='{side_cmd}' for {symbol}")
     return jsonify({"status": "ignored"}), 200
 
