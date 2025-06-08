@@ -116,7 +116,7 @@ app = Flask(__name__)
 
 @app.route('/webhook', methods=['GET','HEAD'])
 def webhook_get():
-    return "Этот эндпоинт принимает только POST.", 200
+    return "Этот эндпоинт принимает только POST-запросы.", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook_post():
@@ -128,7 +128,7 @@ def webhook_post():
     if not symbol or not side_cmd:
         return jsonify({"status":"ignored","reason":"missing symbol or side"}),200
 
-    # 1) BUY
+    # BUY
     if side_cmd == 'buy':
         logger.info(f"▶ Пришёл сигнал BUY для {symbol}")
         http_post("v5/position/set-leverage", {
@@ -138,33 +138,39 @@ def webhook_post():
         balance = get_wallet_balance()
         min_q, step = get_symbol_info(symbol)
         price = get_ticker_price(symbol)
-        if price<=0 or step<=0:
+        if price <= 0 or step <= 0:
             return jsonify({"status":"error","reason":"invalid price or step"}),200
-        qty = max(min_q, step * floor((balance*LONG_LEVERAGE)/(price*step)))
+        qty = max(min_q, step * floor((balance * LONG_LEVERAGE) / (price * step)))
         logger.info(f"Calculated order quantity for {symbol}: {qty}")
+
+        logger.info("▶ Отправляю Market Buy order...")
         resp = http_post("v5/order/create", {
             "category":"linear","symbol":symbol,
             "side":"Buy","orderType":"Market",
             "qty":str(qty),"timeInForce":"ImmediateOrCancel"
         })
-        if resp.get("retCode")!=0:
+        logger.info(f"► Ответ create order: {resp}")
+        if resp.get("retCode") != 0:
+            logger.error(f"❌ Ошибка создания лонга: {resp}")
             return jsonify({"status":"error","reason":resp}),200
+
         order_id = resp["result"].get("orderId","")
         execs = get_executions(symbol, order_id)
         avg_price = price
         if execs:
-            total = sum(float(e['execQty'])*float(e['execPrice']) for e in execs)
-            qty_ex  = sum(float(e['execQty']) for e in execs)
-            avg_price = total/qty_ex
-        pct = (qty*avg_price/LONG_LEVERAGE)/balance*100 if balance>0 else 0
+            total = sum(float(e['execQty']) * float(e['execPrice']) for e in execs)
+            qty_ex = sum(float(e['execQty']) for e in execs)
+            avg_price = total / qty_ex
+        pct = (qty * avg_price / LONG_LEVERAGE) / balance * 100 if balance > 0 else 0
         msg = (f"🔹 Лонг открыт: {symbol}\n"
                f"• Цена входа: {avg_price:.4f}\n"
                f"• Риск: {pct:.2f}% от депозита\n"
                f"• Плечо: {LONG_LEVERAGE}×")
-        logger.info(msg); send_telegram(msg)
+        logger.info(msg)
+        send_telegram(msg)
         return jsonify({"status":"ok"}),200
 
-    # 2) SELL
+    # SELL
     if side_cmd == 'sell':
         logger.info(f"▶ Пришёл сигнал SELL для {symbol}")
         http_post("v5/position/set-leverage", {
@@ -174,33 +180,39 @@ def webhook_post():
         balance = get_wallet_balance()
         min_q, step = get_symbol_info(symbol)
         price = get_ticker_price(symbol)
-        if price<=0 or step<=0:
+        if price <= 0 or step <= 0:
             return jsonify({"status":"error","reason":"invalid price or step"}),200
-        qty = max(min_q, step * floor((balance*SHORT_LEVERAGE)/(price*step)))
+        qty = max(min_q, step * floor((balance * SHORT_LEVERAGE) / (price * step)))
         logger.info(f"Calculated SHORT order quantity for {symbol}: {qty}")
+
+        logger.info("▶ Отправляю Market Sell order...")
         resp = http_post("v5/order/create", {
             "category":"linear","symbol":symbol,
             "side":"Sell","orderType":"Market",
             "qty":str(qty),"timeInForce":"ImmediateOrCancel"
         })
-        if resp.get("retCode")!=0:
+        logger.info(f"► Ответ create order: {resp}")
+        if resp.get("retCode") != 0:
+            logger.error(f"❌ Ошибка создания шорта: {resp}")
             return jsonify({"status":"error","reason":resp}),200
+
         order_id = resp["result"].get("orderId","")
         execs = get_executions(symbol, order_id)
         avg_price = price
         if execs:
-            total = sum(float(e['execQty'])*float(e['execPrice']) for e in execs)
-            qty_ex  = sum(float(e['execQty']) for e in execs)
-            avg_price = total/qty_ex
-        pct = (qty*avg_price/SHORT_LEVERAGE)/balance*100 if balance>0 else 0
+            total = sum(float(e['execQty']) * float(e['execPrice']) for e in execs)
+            qty_ex = sum(float(e['execQty']) for e in execs)
+            avg_price = total / qty_ex
+        pct = (qty * avg_price / SHORT_LEVERAGE) / balance * 100 if balance > 0 else 0
         msg = (f"🔻 Шорт открыт: {symbol}\n"
                f"• Цена входа: {avg_price:.4f}\n"
                f"• Риск: {pct:.2f}% от депозита\n"
                f"• Плечо: {SHORT_LEVERAGE}×")
-        logger.info(msg); send_telegram(msg)
+        logger.info(msg)
+        send_telegram(msg)
         return jsonify({"status":"ok"}),200
 
-    # 3) EXIT LONG
+    # EXIT LONG
     if side_cmd == 'exit long':
         logger.info(f"▶ Пришёл сигнал EXIT LONG для {symbol}")
         positions = get_positions(symbol)
@@ -213,29 +225,31 @@ def webhook_post():
         resp = http_post("v5/order/create", {
             "category":"linear","symbol":symbol,
             "side":"Sell","orderType":"Market",
-            "qty":str(qty),"timeInForce":"ImmediateOrCancel",
-            "reduce_only":True
+            "qty":str(qty),"timeInForce":"ImmediateOrCancel","reduce_only":True
         })
-        if resp.get("retCode")!=0:
+        logger.info(f"► Ответ close long: {resp}")
+        if resp.get("retCode") != 0:
+            logger.error(f"❌ Ошибка закрытия лонга: {resp}")
             return jsonify({"status":"error","reason":resp}),200
-        order_id = resp["result"].get("orderId","")
-        execs = get_executions(symbol, order_id)
+
+        execs = get_executions(symbol, resp["result"]["orderId"])
         exit_price = entry_price
         if execs:
             total = sum(float(e['execQty'])*float(e['execPrice']) for e in execs)
-            qty_ex  = sum(float(e['execQty']) for e in execs)
-            exit_price = total/qty_ex
+            qty_ex = sum(float(e['execQty']) for e in execs)
+            exit_price = total / qty_ex
         pnl = (exit_price - entry_price)*qty
         fee = sum(float(e.get('execFee',0)) for e in execs)
         net_pnl = pnl - fee
-        pct = net_pnl/balance_before*100 if balance_before>0 else 0
+        pct_change = net_pnl / balance_before * 100 if balance_before>0 else 0
         msg = (f"🔹 Лонг закрыт: {symbol}\n"
-               f"• PnL: {net_pnl:.4f} USDT ({pct:+.2f}%)\n"
+               f"• PnL: {net_pnl:.4f} USDT ({pct_change:+.2f}%)\n"
                f"• Цена выхода: {exit_price:.4f}")
-        logger.info(msg); send_telegram(msg)
+        logger.info(msg)
+        send_telegram(msg)
         return jsonify({"status":"ok"}),200
 
-    # 4) EXIT SHORT
+    # EXIT SHORT
     if side_cmd == 'exit short':
         logger.info(f"▶ Пришёл сигнал EXIT SHORT для {symbol}")
         positions = get_positions(symbol)
@@ -248,33 +262,35 @@ def webhook_post():
         resp = http_post("v5/order/create", {
             "category":"linear","symbol":symbol,
             "side":"Buy","orderType":"Market",
-            "qty":str(qty),"timeInForce":"ImmediateOrCancel",
-            "reduce_only":True
+            "qty":str(qty),"timeInForce":"ImmediateOrCancel","reduce_only":True
         })
-        if resp.get("retCode")!=0:
+        logger.info(f"► Ответ close short: {resp}")
+        if resp.get("retCode") != 0:
+            logger.error(f"❌ Ошибка закрытия шорта: {resp}")
             return jsonify({"status":"error","reason":resp}),200
-        order_id = resp["result"].get("orderId","")
-        execs = get_executions(symbol, order_id)
+
+        execs = get_executions(symbol, resp["result"]["orderId"])
         exit_price = entry_price
         if execs:
             total = sum(float(e['execQty'])*float(e['execPrice']) for e in execs)
-            qty_ex  = sum(float(e['execQty']) for e in execs)
-            exit_price = total/qty_ex
+            qty_ex = sum(float(e['execQty']) for e in execs)
+            exit_price = total / qty_ex
         pnl = (entry_price - exit_price)*qty
         fee = sum(float(e.get('execFee',0)) for e in execs)
         net_pnl = pnl - fee
-        pct = net_pnl/balance_before*100 if balance_before>0 else 0
+        pct_change = net_pnl / balance_before * 100 if balance_before>0 else 0
         msg = (f"🔻 Шорт закрыт: {symbol}\n"
-               f"• PnL: {net_pnl:.4f} USDT ({pct:+.2f}%)\n"
+               f"• PnL: {net_pnl:.4f} USDT ({pct_change:+.2f}%)\n"
                f"• Цена выхода: {exit_price:.4f}")
-        logger.info(msg); send_telegram(msg)
+        logger.info(msg)
+        send_telegram(msg)
         return jsonify({"status":"ok"}),200
 
-    # игнорируем всё остальное
+    # IGNORE OTHER
+    logger.info(f"Ignored webhook with side='{side_cmd}' for {symbol}")
     return jsonify({"status":"ignored"}),200
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 10000))
+    port = int(os.getenv('PORT',10000))
     logger.info(f"Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port)
-
