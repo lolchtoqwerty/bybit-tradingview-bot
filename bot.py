@@ -45,15 +45,15 @@ def api_call(method, path, params=None, body=None):
         "X-BAPI-RECV-WINDOW": RECV_WINDOW,
         "X-BAPI-SIGN": sig
     }
-    logger.info("API call %s %s params=%s body=%s", method, path, params, body)
+    logger.info("API call: %s %s | params: %s | body: %s", method, path, params, body)
     resp = requests.request(method, url, headers=headers, params=params, data=payload)
     try:
         resp.raise_for_status()
-    except Exception as e:
-        logger.error("HTTP error on %s %s: %s - %s", method, path, resp.status_code, resp.text)
+    except Exception:
+        logger.error("HTTP error: %s %s returned %s | %s", method, path, resp.status_code, resp.text)
         raise
     data = resp.json()
-    logger.info("API response %s %s: %s", method, path, data)
+    logger.info("API response: %s %s | %s", method, path, data)
     return data
 
 # — Bybit Data —
@@ -98,8 +98,7 @@ def send_telegram(msg: str):
 # — Order Logic —
 def compute_qty(balance, price, leverage, mn, step):
     raw = (balance * leverage * USAGE_RATIO) / price
-    qty = max(mn, step * floor(raw / step))
-    return qty
+    return max(mn, step * floor(raw / step))
 
 
 def place_order(sym, side, qty, reduce_only=False):
@@ -113,45 +112,40 @@ def place_order(sym, side, qty, reduce_only=False):
     }
     if reduce_only:
         body["reduce_only"] = True
-    data = api_call('POST', "v5/order/create", body=body)
-    order_id = data.get("result", {}).get("orderId")
-    if not order_id:
-        logger.error("Order create failed: %s", data)
+    resp = api_call('POST', "v5/order/create", body=body)
+    oid = resp.get("result", {}).get("orderId")
+    if not oid:
+        logger.error("Order create failed: %s", resp)
         return None, []
-    logger.info("Order created %s: %s", side, order_id)
-    execs = get_executions(sym, order_id)
-    return order_id, execs
+    logger.info("Order created: %s %s", side, oid)
+    execs = get_executions(sym, oid)
+    return oid, execs
 
 
 def close_and_open(sym, close_side, open_side, open_lev):
-    logger.info("Close_and_open called: sym=%s, close_side=%s, open_side=%s, open_lev=%s", sym, close_side, open_side, open_lev)
+    logger.info("close_and_open: sym=%s, close_side=%s, open_side=%s", sym, close_side, open_side)
     positions = get_positions(sym)
     pos = next((p for p in positions if p["side"] == close_side), None) if close_side else None
     if close_side and not pos:
-        logger.info("No position to close for side %s", close_side)
-        # proceed to open only
-
-    # Close existing
+        logger.info("No %s position to close", close_side)
     if close_side and pos:
         size = float(pos["size"])
         entry = float(pos["avgPrice"])
         bal = get_wallet_balance()
-        _, execs = place_order(sym, "Sell" if close_side=="Buy" else "Buy", size, reduce_only=True)
-        total_qty = sum(float(e["execQty"]) for e in execs)
-        avg_price = sum(float(e["execQty"])*float(e["execPrice"]) for e in execs) / total_qty if execs else entry
-        fees = sum(float(e.get("execFee",0)) for e in execs)
-        pnl = ((avg_price - entry) if close_side=="Buy" else (entry - avg_price)) * size - fees
+        _, execs = place_order(sym, "Sell" if close_side == "Buy" else "Buy", size, reduce_only=True)
+        total = sum(float(e["execQty"]) for e in execs)
+        avg_price = sum(float(e["execQty"]) * float(e["execPrice"]) for e in execs) / total if execs else entry
+        fees = sum(float(e.get("execFee", 0)) for e in execs)
+        pnl = ((avg_price - entry) if close_side == "Buy" else (entry - avg_price)) * size - fees
         pct = pnl / bal * 100 if bal else 0
-        arrow = "🔹" if close_side=="Buy" else "🔻"
+        arrow = "🔹" if close_side == "Buy" else "🔻"
         send_telegram(f"{arrow} {close_side} closed: {sym}\n• PnL: {pnl:.4f} USDT ({pct:+.2f}%)")
-
-    # Open new
     balance = get_wallet_balance()
     mn, step = get_symbol_info(sym)
     price = get_ticker_price(sym)
     qty = compute_qty(balance, price, open_lev, mn, step)
     _, _ = place_order(sym, open_side, qty)
-    arrow2 = "🔹" if open_side=="Buy" else "🔻"
+    arrow2 = "🔹" if open_side == "Buy" else "🔻"
     send_telegram(f"{arrow2} {open_side} opened: {sym} @ {price}")
 
 # — Flask App —
@@ -160,26 +154,24 @@ app = Flask(__name__)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True)
-    sym  = data.get("symbol")
-    side = data.get("side",""").lower()
-    logger.info("▶ Webhook received: %s", data)
+    logger.info("Webhook received: %s", data)
+    sym = data.get("symbol")
+    side = data.get("side", "").lower()
     if not sym or not side:
+        logger.info("Ignored webhook: missing symbol or side")
         return jsonify(status="ignored"), 200
-
     actions = {
-        "exit long": lambda: close_and_open(sym, "Buy",  "Sell", SHORT_LEVERAGE),
-        "exit short":lambda: close_and_open(sym, "Sell", "Buy",  LONG_LEVERAGE),
-        "buy":       lambda: close_and_open(sym, None,   "Buy",  LONG_LEVERAGE) if not any(p["side"]=="Buy" for p in get_positions(sym)) else logger.info("Already in Buy"),
-        "sell":      lambda: close_and_open(sym, None,   "Sell", SHORT_LEVERAGE) if not any(p["side"]=="Sell" for p in get_positions(sym)) else logger.info("Already in Sell")
+        "exit long": lambda: close_and_open(sym, "Buy", "Sell", SHORT_LEVERAGE),
+        "exit short": lambda: close_and_open(sym, "Sell", "Buy", LONG_LEVERAGE),
+        "buy": lambda: close_and_open(sym, None, "Buy", LONG_LEVERAGE) if not any(p["side"] == "Buy" for p in get_positions(sym)) else logger.info("Already long"),
+        "sell": lambda: close_and_open(sym, None, "Sell", SHORT_LEVERAGE) if not any(p["side"] == "Sell" for p in get_positions(sym)) else logger.info("Already short")
     }
-
     action = actions.get(side)
     if action:
         action()
         return jsonify(status="ok"), 200
-
+    logger.info("No action for side: %s", side)
     return jsonify(status="ignored"), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
-
