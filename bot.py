@@ -32,7 +32,6 @@ def sign_request(payload: str = "", query: str = ""):
     sig = hmac.new(BYBIT_API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
     return ts, sig
 
-
 def api_call(method, path, params=None, body=None):
     url = f"{BASE_URL}/{path}"
     payload = json.dumps(body, separators=(",", ":"), sort_keys=True) if body is not None else ""
@@ -64,22 +63,18 @@ def get_wallet_balance():
     except (KeyError, IndexError):
         return 0.0
 
-
 def get_symbol_info(sym):
     data = api_call('GET', "v5/market/instruments-info", {"category": "linear", "symbol": sym})
     filt = data["result"]["list"][0]["lotSizeFilter"]
     return float(filt["minOrderQty"]), float(filt["qtyStep"])
 
-
 def get_ticker_price(sym):
     data = api_call('GET', "v5/market/tickers", {"category": "linear", "symbol": sym})
     return float(data["result"]["list"][0]["lastPrice"])
 
-
 def get_positions(sym):
     data = api_call('GET', "v5/position/list", {"category": "linear", "symbol": sym})
     return data.get("result", {}).get("list", [])
-
 
 def get_executions(sym, oid):
     data = api_call('GET', "v5/execution/list", {"category": "linear", "symbol": sym, "orderId": oid})
@@ -99,7 +94,6 @@ def send_telegram(msg: str):
 def compute_qty(balance, price, leverage, mn, step):
     raw = (balance * leverage * USAGE_RATIO) / price
     return max(mn, step * floor(raw / step))
-
 
 def place_order(sym, side, qty, reduce_only=False):
     body = {
@@ -121,18 +115,24 @@ def place_order(sym, side, qty, reduce_only=False):
     execs = get_executions(sym, oid)
     return oid, execs
 
-
 def close_and_open(sym, close_side, open_side, open_lev):
     logger.info("close_and_open: sym=%s, close_side=%s, open_side=%s", sym, close_side, open_side)
+    # 1) Закрываем позицию close_side, если задана
     positions = get_positions(sym)
     pos = next((p for p in positions if p["side"] == close_side), None) if close_side else None
     if close_side and not pos:
         logger.info("No %s position to close", close_side)
-    if close_side and pos:
+    if pos:
         size = float(pos["size"])
         entry = float(pos["avgPrice"])
         bal = get_wallet_balance()
-        _, execs = place_order(sym, "Sell" if close_side == "Buy" else "Buy", size, reduce_only=True)
+        # закрытие
+        _, execs = place_order(
+            sym,
+            "Sell" if close_side == "Buy" else "Buy",
+            size,
+            reduce_only=True
+        )
         total = sum(float(e["execQty"]) for e in execs)
         avg_price = sum(float(e["execQty"]) * float(e["execPrice"]) for e in execs) / total if execs else entry
         fees = sum(float(e.get("execFee", 0)) for e in execs)
@@ -140,6 +140,8 @@ def close_and_open(sym, close_side, open_side, open_lev):
         pct = pnl / bal * 100 if bal else 0
         arrow = "🔹" if close_side == "Buy" else "🔻"
         send_telegram(f"{arrow} {close_side} closed: {sym}\n• PnL: {pnl:.4f} USDT ({pct:+.2f}%)")
+
+    # 2) Открываем новую позицию open_side
     balance = get_wallet_balance()
     mn, step = get_symbol_info(sym)
     price = get_ticker_price(sym)
@@ -160,16 +162,21 @@ def webhook():
     if not sym or not side:
         logger.info("Ignored webhook: missing symbol or side")
         return jsonify(status="ignored"), 200
+
     actions = {
-        "exit long": lambda: close_and_open(sym, "Buy", "Sell", SHORT_LEVERAGE),
-        "exit short": lambda: close_and_open(sym, "Sell", "Buy", LONG_LEVERAGE),
-        "buy": lambda: close_and_open(sym, None, "Buy", LONG_LEVERAGE) if not any(p["side"] == "Buy" for p in get_positions(sym)) else logger.info("Already long"),
-        "sell": lambda: close_and_open(sym, None, "Sell", SHORT_LEVERAGE) if not any(p["side"] == "Sell" for p in get_positions(sym)) else logger.info("Already short")
+        "exit long":  lambda: close_and_open(sym, "Buy",  "Sell", SHORT_LEVERAGE),
+        "exit short": lambda: close_and_open(sym, "Sell", "Buy",  LONG_LEVERAGE),
+        # При открытии лонга сначала закроем шорт
+        "buy":        lambda: close_and_open(sym, "Sell", "Buy",  LONG_LEVERAGE),
+        # При открытии шорта сначала закроем лонг
+        "sell":       lambda: close_and_open(sym, "Buy",  "Sell", SHORT_LEVERAGE),
     }
+
     action = actions.get(side)
     if action:
         action()
         return jsonify(status="ok"), 200
+
     logger.info("No action for side: %s", side)
     return jsonify(status="ignored"), 200
 
