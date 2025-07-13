@@ -58,13 +58,11 @@ def get_wallet_balance():
 
 def get_symbol_filters(sym):
     info = api_call('GET', "v5/market/instruments-info", {"category":"linear","symbol":sym})
-    f = info["result"]["list"][0]
-    lot = f["lotSizeFilter"]
-    price = f["priceFilter"]
+    f = info["result"]["list"][0]["lotSizeFilter"]
     return {
-        "minQty": float(lot["minOrderQty"]),
-        "step": float(lot["qtyStep"]),
-        "minNotional": float(lot.get("minNotionalValue", 0)),
+        "minQty": float(f["minOrderQty"]),
+        "step":   float(f["qtyStep"]),
+        "minNotional": float(info["result"]["list"][0]["lotSizeFilter"].get("minNotionalValue", 0)),
     }
 
 def get_ticker_price(sym):
@@ -90,14 +88,10 @@ def send_telegram(msg: str):
     )
 
 # — Order Logic —
-def compute_qty(balance, price, leverage, filters):
+def compute_qty(balance, price, leverage, filt):
     raw = (balance * leverage * USAGE_RATIO) / price
-    step = filters["step"]
-    qty = step * floor(raw / step)
-    # Убедимся, что стоимость >= minNotional
-    if qty * price < filters["minNotional"]:
-        qty = 0
-    return max(0, qty)
+    qty = filt["step"] * floor(raw / filt["step"])
+    return qty if qty * price >= filt["minNotional"] else 0
 
 def place_order(sym, side, qty, reduce_only=False):
     if qty <= 0:
@@ -115,42 +109,38 @@ def place_order(sym, side, qty, reduce_only=False):
     if not oid:
         logger.error("Order create failed: %s", resp)
         return None, []
-    logger.info("Order created: %s %s", side, oid)
     return oid, get_executions(sym, oid)
 
 def close_position(sym, side):
     pos = next((p for p in get_positions(sym) if p["side"]==side), None)
     if not pos:
         return
-    size = float(pos["size"])
+    size  = float(pos["size"])
     entry = float(pos["avgPrice"])
-    _, execs = place_order(sym, "Sell" if side=="Buy" else "Buy", size, reduce_only=True)
+    oid, execs = place_order(sym, "Sell" if side=="Buy" else "Buy", size, reduce_only=True)
     total = sum(float(e["execQty"]) for e in execs)
-    avg = sum(float(e["execQty"])*float(e["execPrice"]) for e in execs)/total if total else entry
-    fees = sum(float(e.get("execFee",0)) for e in execs)
-    bal = get_wallet_balance()
-    pnl = ((avg-entry)*size - fees) if side=="Buy" else ((entry-avg)*size - fees)
-    pct = pnl/bal*100 if bal else 0
+    avg   = sum(float(e["execQty"])*float(e["execPrice"]) for e in execs)/total if total else entry
+    fees  = sum(float(e.get("execFee",0)) for e in execs)
+    bal   = get_wallet_balance()
+    pnl   = ((avg-entry)*size - fees) if side=="Buy" else ((entry-avg)*size - fees)
+    pct   = pnl/bal*100 if bal else 0
     arrow = "🔹" if side=="Buy" else "🔻"
     send_telegram(f"{arrow} {side} closed: {sym}\n• PnL: {pnl:.4f} USDT ({pct:+.2f}%)")
 
 def open_position(sym, side, leverage):
-    # не открываем, если уже есть такая позиция
     if any(p["side"]==side for p in get_positions(sym)):
         return
-    balance = get_wallet_balance()
-    price   = get_ticker_price(sym)
-    filt    = get_symbol_filters(sym)
-    qty     = compute_qty(balance, price, leverage, filt)
-    oid, _  = place_order(sym, side, qty)
-    arrow   = "🔹" if side=="Buy" else "🔻"
+    bal   = get_wallet_balance()
+    price = get_ticker_price(sym)
+    filt  = get_symbol_filters(sym)
+    qty   = compute_qty(bal, price, leverage, filt)
+    oid, _= place_order(sym, side, qty)
+    arrow = "🔹" if side=="Buy" else "🔻"
     send_telegram(f"{arrow} {side} opened: {sym} @ {price}")
 
 def close_and_open(sym, target_side):
-    # закрываем противоположную
     opposite = "Buy" if target_side=="Sell" else "Sell"
     close_position(sym, opposite)
-    # открываем нужную
     lev = LONG_LEVERAGE if target_side=="Buy" else SHORT_LEVERAGE
     open_position(sym, target_side, lev)
 
@@ -166,18 +156,18 @@ def webhook():
     if not sym or not side:
         return jsonify(status="ignored"),200
 
-    if side=="buy":
-        close_and_open(sym,"Buy")
-    elif side=="sell":
-        close_and_open(sym,"Sell")
-    elif side=="exit long":
-        close_and_open(sym,"Sell")
-    elif side=="exit short":
-        close_and_open(sym,"Buy")
+    if side == "buy":
+        close_and_open(sym, "Buy")
+    elif side == "sell":
+        close_and_open(sym, "Sell")
+    elif side == "exit long":
+        close_position(sym, "Buy")
+    elif side == "exit short":
+        close_position(sym, "Sell")
     else:
         return jsonify(status="ignored"),200
 
     return jsonify(status="ok"),200
 
 if __name__=='__main__':
-    app.run(host='0.0.0.0',port=int(os.getenv('PORT',10000)))
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
