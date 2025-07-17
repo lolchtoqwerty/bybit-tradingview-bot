@@ -32,6 +32,7 @@ def sign_request(payload: str = "", query: str = ""):
     sig = hmac.new(BYBIT_API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
     return ts, sig
 
+
 def api_call(method, path, params=None, body=None):
     url = f"{BASE_URL}/{path}"
     payload = json.dumps(body, separators=(",", ":"), sort_keys=True) if body is not None else ""
@@ -56,22 +57,28 @@ def get_wallet_balance():
     data = api_call('GET', "v5/account/wallet-balance", {"coin": "USDT", "accountType": "UNIFIED"})
     return float(data["result"]["list"][0]["totalAvailableBalance"])
 
+
 def get_symbol_filters(sym):
     info = api_call('GET', "v5/market/instruments-info", {"category":"linear","symbol":sym})
-    f = info["result"]["list"][0]["lotSizeFilter"]
+    f = info["result"]["list"][0]
+    lot = f["lotSizeFilter"]
+    price = f["priceFilter"]
     return {
-        "minQty": float(f["minOrderQty"]),
-        "step":   float(f["qtyStep"]),
-        "minNotional": float(info["result"]["list"][0]["lotSizeFilter"].get("minNotionalValue", 0)),
+        "minQty": float(lot["minOrderQty"]),
+        "step": float(lot["qtyStep"]),
+        "minNotional": float(lot.get("minNotionalValue", 0)),
     }
+
 
 def get_ticker_price(sym):
     data = api_call('GET', "v5/market/tickers", {"category":"linear","symbol":sym})
     return float(data["result"]["list"][0]["lastPrice"])
 
+
 def get_positions(sym):
     data = api_call('GET', "v5/position/list", {"category":"linear","symbol":sym})
     return data["result"]["list"]
+
 
 def get_executions(sym, oid):
     data = api_call('GET', "v5/execution/list", {"category":"linear","symbol":sym,"orderId":oid})
@@ -88,20 +95,20 @@ def send_telegram(msg: str):
     )
 
 # — Order Logic —
-def compute_qty(balance, price, leverage, filt):
+def compute_qty(balance, price, leverage, filters):
     raw = (balance * leverage * USAGE_RATIO) / price
-    qty = filt["step"] * floor(raw / filt["step"])
-    return qty if qty * price >= filt["minNotional"] else 0
+    step = filters["step"]
+    qty = step * floor(raw / step)
+    if qty * price < filters["minNotional"]:
+        return 0
+    return max(0, qty)
+
 
 def place_order(sym, side, qty, reduce_only=False):
     if qty <= 0:
         logger.error("Qty too small, skip order: %s", qty)
         return None, []
-    body = {
-        "category":"linear","symbol":sym,
-        "side":side,"orderType":"Market","qty":str(qty),
-        "timeInForce":"ImmediateOrCancel"
-    }
+    body = {"category":"linear","symbol":sym, "side":side, "orderType":"Market", "qty":str(qty), "timeInForce":"ImmediateOrCancel"}
     if reduce_only:
         body["reduce_only"] = True
     resp = api_call('POST', "v5/order/create", body=body)
@@ -109,7 +116,9 @@ def place_order(sym, side, qty, reduce_only=False):
     if not oid:
         logger.error("Order create failed: %s", resp)
         return None, []
+    logger.info("Order created: %s %s", side, oid)
     return oid, get_executions(sym, oid)
+
 
 def close_position(sym, side):
     pos = next((p for p in get_positions(sym) if p["side"]==side), None)
@@ -117,7 +126,7 @@ def close_position(sym, side):
         return
     size  = float(pos["size"])
     entry = float(pos["avgPrice"])
-    oid, execs = place_order(sym, "Sell" if side=="Buy" else "Buy", size, reduce_only=True)
+    _, execs = place_order(sym, "Sell" if side=="Buy" else "Buy", size, reduce_only=True)
     total = sum(float(e["execQty"]) for e in execs)
     avg   = sum(float(e["execQty"])*float(e["execPrice"]) for e in execs)/total if total else entry
     fees  = sum(float(e.get("execFee",0)) for e in execs)
@@ -127,22 +136,25 @@ def close_position(sym, side):
     arrow = "🔹" if side=="Buy" else "🔻"
     send_telegram(f"{arrow} {side} closed: {sym}\n• PnL: {pnl:.4f} USDT ({pct:+.2f}%)")
 
+
 def open_position(sym, side, leverage):
     if any(p["side"]==side for p in get_positions(sym)):
         return
-    bal   = get_wallet_balance()
-    price = get_ticker_price(sym)
-    filt  = get_symbol_filters(sym)
-    qty   = compute_qty(bal, price, leverage, filt)
-    oid, _= place_order(sym, side, qty)
-    arrow = "🔹" if side=="Buy" else "🔻"
+    balance = get_wallet_balance()
+    price   = get_ticker_price(sym)
+    filt    = get_symbol_filters(sym)
+    qty     = compute_qty(balance, price, leverage, filt)
+    oid, _  = place_order(sym, side, qty)
+    arrow   = "🔹" if side=="Buy" else "🔻"
     send_telegram(f"{arrow} {side} opened: {sym} @ {price}")
 
+
 def close_and_open(sym, target_side):
-    opposite = "Buy" if target_side=="Sell" else "Sell"
+    opposite  = "Buy" if target_side=="Sell" else "Sell"
     close_position(sym, opposite)
-    lev = LONG_LEVERAGE if target_side=="Buy" else SHORT_LEVERAGE
-    open_position(sym, target_side, lev)
+    time.sleep(0.5)  # даём бирже время обновить позицию
+    leverage = LONG_LEVERAGE if target_side=="Buy" else SHORT_LEVERAGE
+    open_position(sym, target_side, leverage)
 
 # — Flask App —
 app = Flask(__name__)
@@ -151,23 +163,19 @@ app = Flask(__name__)
 def webhook():
     data = request.get_json(force=True)
     sym  = data.get("symbol")
-    side = data.get("side","").lower()
+    side = data.get("side",""").lower()
     logger.info("Webhook: %s", data)
     if not sym or not side:
         return jsonify(status="ignored"),200
 
-    if side == "buy":
+    if side in ("buy", "exit short"):
         close_and_open(sym, "Buy")
-    elif side == "sell":
+    elif side in ("sell", "exit long"):
         close_and_open(sym, "Sell")
-    elif side == "exit long":
-        close_position(sym, "Buy")
-    elif side == "exit short":
-        close_position(sym, "Sell")
     else:
         return jsonify(status="ignored"),200
 
     return jsonify(status="ok"),200
 
 if __name__=='__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT',10000)))
