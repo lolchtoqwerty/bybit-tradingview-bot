@@ -163,19 +163,4 @@ app = Flask(__name__)
 def webhook():
     data = request.get_json(force=True)
     sym  = data.get("symbol")
-    side = data.get("side",""").lower()
-    logger.info("Webhook: %s", data)
-    if not sym or not side:
-        return jsonify(status="ignored"),200
-
-    if side in ("buy", "exit short"):
-        close_and_open(sym, "Buy")
-    elif side in ("sell", "exit long"):
-        close_and_open(sym, "Sell")
-    else:
-        return jsonify(status="ignored"),200
-
-    return jsonify(status="ok"),200
-
-if __name__=='__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT',10000)))
+        side = data.get("side",""").lower()
