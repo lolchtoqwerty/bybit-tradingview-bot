@@ -32,6 +32,7 @@ def sign_request(payload: str = "", query: str = ""):
     sig = hmac.new(BYBIT_API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
     return ts, sig
 
+
 def api_call(method, path, params=None, body=None):
     url = f"{BASE_URL}/{path}"
     payload = json.dumps(body, separators=(",", ":"), sort_keys=True) if body is not None else ""
@@ -56,6 +57,7 @@ def get_wallet_balance():
     data = api_call('GET', "v5/account/wallet-balance", {"coin": "USDT", "accountType": "UNIFIED"})
     return float(data["result"]["list"][0]["totalAvailableBalance"])
 
+
 def get_symbol_filters(sym):
     info = api_call('GET', "v5/market/instruments-info", {"category":"linear","symbol":sym})
     f = info["result"]["list"][0]
@@ -67,13 +69,16 @@ def get_symbol_filters(sym):
         "minNotional": float(lot.get("minNotionalValue", 0)),
     }
 
+
 def get_ticker_price(sym):
     data = api_call('GET', "v5/market/tickers", {"category":"linear","symbol":sym})
     return float(data["result"]["list"][0]["lastPrice"])
 
+
 def get_positions(sym):
     data = api_call('GET', "v5/position/list", {"category":"linear","symbol":sym})
     return data["result"]["list"]
+
 
 def get_executions(sym, oid):
     data = api_call('GET', "v5/execution/list", {"category":"linear","symbol":sym,"orderId":oid})
@@ -94,9 +99,10 @@ def compute_qty(balance, price, leverage, filters):
     raw = (balance * leverage * USAGE_RATIO) / price
     step = filters["step"]
     qty = step * floor(raw / step)
-    if qty < filters["minQty"]:
+    if qty * price < filters["minNotional"]:
         return 0
-    return qty
+    return max(0, qty)
+
 
 def place_order(sym, side, qty, reduce_only=False):
     if qty <= 0:
@@ -112,6 +118,7 @@ def place_order(sym, side, qty, reduce_only=False):
         return None, []
     logger.info("Order created: %s %s", side, oid)
     return oid, get_executions(sym, oid)
+
 
 def close_position(sym, side):
     pos = next((p for p in get_positions(sym) if p["side"]==side), None)
@@ -129,6 +136,7 @@ def close_position(sym, side):
     arrow = "🔹" if side=="Buy" else "🔻"
     send_telegram(f"{arrow} {side} closed: {sym}\n• PnL: {pnl:.4f} USDT ({pct:+.2f}%)")
 
+
 def open_position(sym, side, leverage):
     if any(p["side"]==side for p in get_positions(sym)):
         return
@@ -140,37 +148,75 @@ def open_position(sym, side, leverage):
     arrow   = "🔹" if side=="Buy" else "🔻"
     send_telegram(f"{arrow} {side} opened: {sym} @ {price}")
 
-def close_and_open(sym, target_side, leverage):
-    opposite  = "Buy" if target_side=="Sell" else "Sell"
+
+def wait_until_position_closed(sym, side, timeout=3.0, poll=0.2):
+    """Poll positions until the given side is flat or timeout expires."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if not any(p.get("side") == side and float(p.get("size", 0)) > 0 for p in get_positions(sym)):
+                return True
+        except Exception as e:
+            logger.warning("wait_until_position_closed error: %s", e)
+        time.sleep(poll)
+    return False
+
+
+def close_and_open(sym, target_side, leverage=None):
+    """Close opposite side then immediately open target side.
+    If leverage is None, use defaults LONG/SHORT.
+    """
+    opposite = "Buy" if target_side == "Sell" else "Sell"
     close_position(sym, opposite)
-    time.sleep(0.5)  # даём бирже время обновить позицию
-    open_position(sym, target_side, leverage)
+    # Подождём подтверждения закрытия, чтобы избежать проблем с маржой/балансом
+    wait_until_position_closed(sym, opposite, timeout=3.0, poll=0.2)
+
+    lev = leverage if leverage is not None else (LONG_LEVERAGE if target_side == "Buy" else SHORT_LEVERAGE)
+    # Небольшая пауза для консистентности
+    time.sleep(0.2)
+    open_position(sym, target_side, lev)
+
 
 # — Flask App —
 app = Flask(__name__)
 
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(force=True) or {}
         sym = data.get("symbol")
-        side = data.get("side", "").lower()
+        raw_side = str(data.get("side", "")).strip()
+        side = raw_side.replace("_", " ").lower().strip()
         leverage = data.get("leverage")
 
-        if side in ["buy", "sell"]:
-            target_side = "Buy" if side == "buy" else "Sell"
-            lev = int(leverage) if leverage else (LONG_LEVERAGE if target_side == "Buy" else SHORT_LEVERAGE)
-            close_and_open(sym, target_side, lev)
-            logger.info(f"Processed {side} for {sym} with leverage {lev}")
-        elif "exit" in side:
-            logger.info(f"Ignoring exit alert: {side} for {sym}")
+        if not sym or not side:
+            return jsonify(status="ignored"), 200
+
+        # Нормализуем и маппим сигнал
+        if side in ("buy", "long"):
+            target = "Buy"
+        elif side in ("sell", "short"):
+            target = "Sell"
+        elif side in ("exit long", "close long", "exit buy", "close buy"):
+            target = "Sell"  # реверс немедленно
+        elif side in ("exit short", "close short", "exit sell", "close sell"):
+            target = "Buy"   # реверс немедленно
         else:
-            logger.error(f"Unknown side: {side} for {sym}")
-        
-        return jsonify({"status": "ok"}), 200
+            logger.warning("Unknown side value: %r", raw_side)
+            return jsonify(status="ignored"), 200
+
+        # Леверидж из webhook (если пришёл корректный), иначе дефолт на сторону
+        lev = int(leverage) if isinstance(leverage, (int, float, str)) and str(leverage).isdigit() else None
+
+        close_and_open(sym, target, lev)
+        logger.info("Processed %s -> %s for %s with leverage %s", raw_side, target, sym, lev or "(default)")
+        return jsonify(status="ok"), 200
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.exception("Error processing webhook")
+        return jsonify(status="error", message=str(e)), 500
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.getenv('PORT', '10000'))
+    app.run(host='0.0.0.0', port=port)
